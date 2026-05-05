@@ -613,6 +613,118 @@ static const HisiSoCConfig hi3516cv500_soc = {
 };
 
 /*
+ * Hi3516AV300 (V4A): 2019, 4K smart-vision.  Dual Cortex-A7 @900MHz.
+ * Video: H.265/H.264, 4K(3840x2160)@30fps.  NPU: 1.0 TOPS.
+ * Same die family as CV500 (identical peripheral map, MMC, SRAM, IRQs);
+ * differs only in feature tier (4K + bigger NPU) and the SCSYSID family
+ * ID 0x3516A300 (vs CV500's 0x3516C500).
+ */
+static const HisiSoCConfig hi3516av300_soc = {
+    .name               = "hi3516av300",
+    .desc               = "HiSilicon Hi3516AV300 (Cortex-A7, dual-core, 4K)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
+    .soc_id             = HISI_SOC_ID_AV300,
+    .default_sensor     = "imx415",        /* Sony 4K Starvis on AV300 ref boards */
+    /* Same memory layout as CV500: external DDR, 128 MiB typical. */
+    .ram_size_default   = 128 * MiB,
+    .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=hisi "
+                          "mmz=anonymous,0,0x82000000,96M",
+    .max_cpus           = 2,
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 40 * KiB,
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x10301000,
+    .gic_cpu_base       = 0x10302000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12020000,
+    .crg_base           = 0x12010000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x120A0000, 0x120A1000, 0x120A2000 },
+    .uart_irqs          = { 6, 7, 8 },
+
+    .num_timers         = 2,
+    .timer_bases        = { 0x12000000, 0x12001000 },
+    .timer_irqs         = { 1, 2 },
+
+    .num_spis           = 3,
+    .spi_bases          = { 0x120C0000, 0x120C1000, 0x120C2000 },
+    .spi_irqs           = { 68, 69, 70 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x14000000,
+
+    .gpio_base          = 0x120D0000,
+    .gpio_count         = 11,
+    .gpio_stride        = 0x1000,
+    .gpio_irq_start     = 16,
+    .gpio_extras        = {
+        { 0x120DB000, 80 },
+    },
+
+    .femac_base         = 0x10010000,
+    .femac_irq          = 32,
+
+    .num_himci          = 3,
+    .himci_bases        = { 0x10100000, 0x100F0000, 0x10020000 },
+    .himci_irqs         = { 64, 30, 31 },
+
+    .num_i2c            = 7,
+    .i2c_bases          = { 0x120B0000, 0x120B1000, 0x120B2000, 0x120B3000,
+                            0x120B5000, 0x120B6000, 0x120B7000 },
+
+    .mipi_rx_base       = 0x113A0000,
+    .mipi_rx_irq        = 57,
+
+    .rtc_base           = 0x12080000,
+    .rtc_irq            = 5,
+
+    .vedu_base          = 0x11500000,
+    .jpge_base          = 0x11220000,
+    .vedu_irq           = 40,
+    .jpge_irq           = 36,
+
+    .wdt_base           = 0x12051000,
+    .wdt_irq            = -1,
+    .wdt_freq           = 3000000,
+
+    .num_crg_defaults   = 4,
+    .crg_defaults       = {
+        { 0x1B8, (1 << 0) | (1 << 1) | (1 << 2) | (1 << 18)
+               | (1 << 11) | (1 << 12) | (1 << 13)
+               | (1 << 14) | (1 << 15) | (1 << 16)
+               | (1 << 17) | (1 << 18) },
+        { 0x144, 0x02 },
+        { 0x16C, 0x02 },
+        { 0x78,  (1 << 2) | (1 << 4) },
+    },
+
+    .gzip_base          = 0x11200000,
+
+    .cpu_srst_offset    = 0x78,
+
+    .num_regbanks       = 11,
+    .regbanks           = {
+        { "hisi-misc",       0x12030000, 0x8000  },
+        { "hisi-ddr",        0x12060000, 0x10000 },
+        { "hisi-iocfg",      0x12040000, 0x10000 },
+        { "hisi-iocfg2",     0x10FF0000, 0x10000 },
+        { "hisi-pwm",        0x12070000, 0x10000 },
+        { "hisi-usb3",       0x100E0000, 0x10000 },
+        { "hisi-vi-cap",     0x11300000, 0x100000 },
+        { "hisi-vi-proc",    0x11000000, 0x40000 },
+        { "hisi-vpss",       0x11040000, 0x10000 },
+        { "hisi-aiao",       0x113B0000, 0x20000 },
+        { "hisi-npu",        0x11700000, 0x100000 },  /* 1.0 TOPS NPU */
+    },
+};
+
+/*
  * Hi3519V101 (V3A): ~2017, 4K professional.
  * CPU: Cortex-A17 @1.25GHz + Cortex-A7 @800MHz (big.LITTLE).
  * Video: H.265, 4-frame WDR, 4K@30fps + 2M@30fps simultaneous.
@@ -698,6 +810,106 @@ static const HisiSoCConfig hi3519v101_soc = {
     .num_crg_defaults   = 1,
     .crg_defaults       = {
         /* APLL ctrl_reg2: fbdiv=792, refdiv=24 → 792 MHz (prevents div-by-zero) */
+        { 0x04, (24 << 12) | 792 },
+    },
+
+    .num_regbanks       = 11,
+    .regbanks           = {
+        { "hisi-misc",       0x12030000, 0x10000 },
+        { "hisi-ddr",        0x12060000, 0x10000 },
+        { "hisi-iocfg",      0x12160000, 0x10000 },
+        { "hisi-pwm",        0x12130000, 0x10000 },
+        { "hisi-usb-ehci",   0x10120000, 0x10000 },
+        { "hisi-usb-ohci",   0x10110000, 0x10000 },
+        { "hisi-gmac",       0x10050000, 0x10000 },
+        { "hisi-vi-cap",     0x11380000, 0x100000 },
+        { "hisi-vou",        0x11000000, 0x20000 },
+        { "hisi-vpss",       0x11180000, 0x10000 },
+        { "hisi-aiao",       0x11080000, 0x10000 },
+    },
+};
+
+/*
+ * Hi3516AV200 (V3A): same die as 3519V101, distinguished by SCSYSID0
+ * sub-variant byte (5/6/0x15/0x16 per ipctool's get_chip_V3A).  Targets
+ * 5M@30fps + 720P@30fps cameras with the same big.LITTLE A17+A7 layout.
+ *
+ * Per the joint hi3519v101/hi3516av200 hardware guide ("未有特殊说明，
+ * Hi3516AV200 与Hi3519V101 完全一致"), every peripheral address, IRQ,
+ * GPIO count, and clock matches 3519V101.  Inherit everything via the
+ * 3519V101 layout; just swap SoC ID variant + default sensor.
+ */
+static const HisiSoCConfig hi3516av200_soc = {
+    .name               = "hi3516av200",
+    .desc               = "HiSilicon Hi3516AV200 (Cortex-A7, big.LITTLE die)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a7"),
+    .soc_id             = HISI_SOC_ID_19V101,    /* shares family with 3519V101 */
+    .chipid_byte_layout = true,
+    .chip_variant       = 5,                     /* SCSYSID0 byte 5 = 3516AV200 */
+    .default_sensor     = "imx385",              /* Sony 1080p Starvis on AV200 ref boards */
+    .ram_size_default   = 256 * MiB,
+    .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=hisi "
+                          "mmz=anonymous,0,0x82000000,224M",
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = true,
+    .gic_dist_base      = 0x10301000,
+    .gic_cpu_base       = 0x10302000,
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12020000,
+    .crg_base           = 0x12010000,
+
+    .num_uarts          = 5,
+    .uart_bases         = { 0x12100000, 0x12101000, 0x12102000,
+                            0x12103000, 0x12104000 },
+    .uart_irqs          = { 4, 5, 6, 7, 8 },
+
+    .num_timers         = 2,
+    .timer_bases        = { 0x12000000, 0x12001000 },
+    .timer_irqs         = { 64, 66 },
+    .timer_freq         = 3000000,
+
+    .num_spis           = 4,
+    .spi_bases          = { 0x12120000, 0x12121000, 0x12122000, 0x12123000 },
+    .spi_irqs           = { 9, 10, 11, 12 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x14000000,
+
+    .gpio_base          = 0x12140000,
+    .gpio_count         = 17,
+    .gpio_stride        = 0x1000,
+    .gpio_irq           = 43,
+
+    .num_himci          = 3,
+    .himci_bases        = { 0x100c0000, 0x100d0000, 0x100e0000 },
+    .himci_irqs         = { 23, 24, 13 },
+
+    .num_i2c            = 4,
+    .i2c_bases          = { 0x12110000, 0x12111000, 0x12112000, 0x12113000 },
+
+    .mipi_rx_base       = 0x11300000,
+    .mipi_rx_irq        = 28,
+
+    .rtc_base           = 0x12090000,
+    .rtc_irq            = 1,
+
+    .vedu_base          = 0x11280000,
+    .jpge_base          = 0x11200000,
+    .vedu_irq           = 37,
+    .jpge_irq           = 38,
+
+    .wdt_base           = 0x12080000,
+    .wdt_irq            = -1,
+    .wdt_freq           = 3000000,
+
+    .num_crg_defaults   = 1,
+    .crg_defaults       = {
         { 0x04, (24 << 12) | 792 },
     },
 
@@ -2407,6 +2619,12 @@ static void hisilicon_common_init(MachineState *machine,
             } else if (!strcmp(sensor_name, "imx291")) {
                 sensor = qdev_new("hisi-imx291");
                 i2c_addr = 0x1A;
+            } else if (!strcmp(sensor_name, "imx415")) {
+                sensor = qdev_new("hisi-imx415");
+                i2c_addr = 0x1A;
+            } else if (!strcmp(sensor_name, "imx385")) {
+                sensor = qdev_new("hisi-imx385");
+                i2c_addr = 0x1A;
             } else if (!strcmp(sensor_name, "f37")) {
                 sensor = qdev_new("hisi-f37");
                 i2c_addr = 0x40;
@@ -2458,10 +2676,10 @@ static void hisilicon_common_init(MachineState *machine,
                 i2c_addr = 0x30;
             } else {
                 error_report("Unknown sensor '%s' (supported: imx291, "
-                             "imx307, imx335, f37, gc2053, sp2305, "
-                             "mis2006, sc2235p, sc2235e, sc2315, sc2315e, "
-                             "sc2335, sc2239, sc307h, imx122, imx222; "
-                             "or 'none' to disable default)",
+                             "imx307, imx335, imx385, imx415, f37, "
+                             "gc2053, sp2305, mis2006, sc2235p, sc2235e, "
+                             "sc2315, sc2315e, sc2335, sc2239, sc307h, "
+                             "imx122, imx222; or 'none' to disable default)",
                              sensor_name);
                 exit(1);
             }
@@ -2588,7 +2806,9 @@ DEFINE_HISI_MACHINE("hi3516cv200", hi3516cv200, hi3516cv200_soc)
 DEFINE_HISI_MACHINE("hi3516av100", hi3516av100, hi3516av100_soc)
 DEFINE_HISI_MACHINE("hi3516cv300", hi3516cv300, hi3516cv300_soc)
 DEFINE_HISI_MACHINE("hi3516cv500", hi3516cv500, hi3516cv500_soc)
+DEFINE_HISI_MACHINE("hi3516av300", hi3516av300, hi3516av300_soc)
 DEFINE_HISI_MACHINE("hi3519v101", hi3519v101, hi3519v101_soc)
+DEFINE_HISI_MACHINE("hi3516av200", hi3516av200, hi3516av200_soc)
 DEFINE_HISI_MACHINE("hi3516ev300", hi3516ev300, hi3516ev300_soc)
 DEFINE_HISI_MACHINE("hi3516ev200", hi3516ev200, hi3516ev200_soc)
 DEFINE_HISI_MACHINE("hi3518ev300", hi3518ev300, hi3518ev300_soc)
