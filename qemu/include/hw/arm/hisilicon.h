@@ -223,8 +223,13 @@ typedef struct HisiSoCConfig {
 /* V3.5 generation (Cortex-A7 + GIC, but V3-era address map) */
 #define HISI_SOC_ID_CV500       0x3516C500
 
+/* V4A generation — same architecture as CV500 with 4K + bigger NPU */
+#define HISI_SOC_ID_AV300       0x3516A300
+
 /* V3A generation (Cortex-A7/A17 big.LITTLE + GIC, V3-era address map) */
 #define HISI_SOC_ID_19V101      0x35190101
+/* AV200 shares 19V101's family ID; sub-variant byte 5/6/0x15/0x16
+ * in SCSYSID0 distinguishes 3516AV200 from 3519V101 (0/1/2/0x11/0x12). */
 
 /*
  * V5 generation (Cortex-A7 MP2 + GIC, new 0x11xxxxxx address map, ~2023)
