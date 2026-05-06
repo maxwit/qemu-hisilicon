@@ -1051,9 +1051,20 @@ static const HisiSoCConfig hi3516ev300_soc = {
         { 0x1bc, (1 << 12) | (1 << 13) },/* SPI0/1 clock enable */
     },
 
-    .num_regbanks       = 1,
+    /* Match real EV300 silicon — vendor open_vi.ko / open_vpss.ko /
+     * open_vedu.ko reach for these MMIO blocks; without backing
+     * regbank RAM their writes vanish and reads return 0, which
+     * the vendor IRQ handlers then mistake for a spurious IRQ and
+     * panic ("VI_COMM_ProcIrqRoute line 1993").  Layout from the
+     * V4 family map (also used by the Goke variants via the
+     * HISI_V4_COMMON_PERIPH macro) plus EV300-specific IVE. */
+    .num_regbanks       = 5,
     .regbanks           = {
-        { "hisi-ive",    0x11320000, 0x10000 },
+        { "hisi-vi-cap",     0x11000000, 0x200000 },
+        { "hisi-vi-proc",    0x11200000, 0x40000  },
+        { "hisi-vgs",        0x11300000, 0x10000  },
+        { "hisi-ive",        0x11320000, 0x10000  },
+        { "hisi-vpss",       0x11400000, 0x10000  },
     },
 };
 
