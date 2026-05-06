@@ -12,7 +12,7 @@
  * messages.
  *
  * This device fires the VI_CAP / VI_PROC / VPSS IRQ lines on a periodic
- * timer matching the configured sensor framerate (default 25 fps).  No
+ * timer matching the configured sensor framerate (default 5 fps).  No
  * MMIO contract — vendor VI / VPSS register state is whatever the RAM-
  * backed regbanks behind 0x11000000 / 0x11200000 / 0x11400000 carry,
  * which is "all zeros at reset, then whatever the vendor wrote".  The
@@ -56,11 +56,21 @@ struct HisiViFpState {
     qemu_irq irq_vi_proc;
     qemu_irq irq_vpss;
 
-    /* Sensor framerate from QOM property (default 25 fps). */
+    /* Sensor framerate from QOM property (default 5 fps — see
+     * hisi_vi_fp_properties for why TCG can't keep up at 25). */
     uint32_t fps;
 
     /* Periodic frame timer. */
     QEMUTimer *frame_timer;
+
+    /* Deassert timer — fires shortly after frame_timer to drop the
+     * IRQ lines back to 0 once the vendor handlers have had a chance
+     * to run.  Without this delayed deassert the kernel sees the line
+     * stay high and re-enters the handler in a tight loop, starving
+     * userspace.  With qemu_irq_pulse the GIC misses the level entirely
+     * (counter stays at 0 in /proc/interrupts).  This timer threads the
+     * needle: assert in tick, deassert ~5 ms later. */
+    QEMUTimer *deassert_timer;
 
     /* IRQ heartbeat enable.
      *   Guest writes 1 to MMIO offset 0x000 to start the heartbeat
@@ -100,9 +110,9 @@ static uint64_t hisi_vi_fp_read(void *opaque, hwaddr offset, unsigned size)
 
 static void hisi_vi_fp_arm_timer(HisiViFpState *s)
 {
-    uint32_t period_ms = s->fps ? (1000U / s->fps) : 40U;
+    uint32_t period_ms = s->fps ? (1000U / s->fps) : 200U;
     timer_mod(s->frame_timer,
-              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + period_ms);
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + period_ms);
 }
 
 static void hisi_vi_fp_write(void *opaque, hwaddr offset,
@@ -180,6 +190,14 @@ static const struct {
     { 0x110000F0, 0x00000F00, "VI_CAP0+0xF0   (cap IRQ status, IsCapValidInt mask)" },
 };
 
+static void hisi_vi_fp_deassert(void *opaque)
+{
+    HisiViFpState *s = HISI_VI_FP(opaque);
+    qemu_set_irq(s->irq_vi_cap, 0);
+    qemu_set_irq(s->irq_vi_proc, 0);
+    qemu_set_irq(s->irq_vpss, 0);
+}
+
 static void hisi_vi_fp_tick(void *opaque)
 {
     HisiViFpState *s = HISI_VI_FP(opaque);
@@ -208,16 +226,16 @@ static void hisi_vi_fp_tick(void *opaque)
         }
     }
 
-    /* GIC SPIs are configured level-sensitive in the vendor DT, so
-     * pulse() (raise+lower in the same step) is missed.  Drop the
-     * lines low then assert and HOLD them high; the next tick lowers
-     * them before re-asserting — the handler runs in between. */
-    qemu_set_irq(s->irq_vi_cap, 0);
-    qemu_set_irq(s->irq_vi_proc, 0);
-    qemu_set_irq(s->irq_vpss, 0);
+    /* Assert the lines now; the deassert_timer (5 ms later) drops
+     * them.  Real silicon clears the IRQ source on register read,
+     * which we don't model — but giving the kernel a 5 ms window of
+     * "line high" is enough for one handler invocation per pulse,
+     * and the subsequent deassert keeps it from looping. */
     qemu_set_irq(s->irq_vi_cap, 1);
     qemu_set_irq(s->irq_vi_proc, 1);
     qemu_set_irq(s->irq_vpss, 1);
+    timer_mod(s->deassert_timer,
+              qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 5);
 
     s->pulses++;
     if (s->pulses <= 5 || (s->pulses % 25) == 0) {
@@ -234,8 +252,16 @@ static void hisi_vi_fp_realize(DeviceState *dev, Error **errp)
 {
     HisiViFpState *s = HISI_VI_FP(dev);
 
-    s->frame_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+    /* QEMU_CLOCK_REALTIME (wall-clock) — not VIRTUAL: a real CMOS sensor
+     * fires its frame-ready strobe at a wall-clock rate fixed by the
+     * pixel-clock crystal, regardless of how busy the SoC is.  And on
+     * TCG, where each guest cycle costs ~10x its native budget, using
+     * VIRTUAL would let the heartbeat outrun the guest's IRQ-handler
+     * throughput so the kernel never gets back to userspace. */
+    s->frame_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
                                   hisi_vi_fp_tick, s);
+    s->deassert_timer = timer_new_ms(QEMU_CLOCK_REALTIME,
+                                     hisi_vi_fp_deassert, s);
     /* Don't start firing yet — guest must explicitly enable via
      * MMIO write to VI_FP_REG_CTRL once the vendor MPP modules and
      * Majestic are fully initialised.  Firing earlier hits NULL
@@ -265,13 +291,21 @@ static void hisi_vi_fp_reset(DeviceState *dev)
     if (s->frame_timer) {
         timer_del(s->frame_timer);
     }
+    if (s->deassert_timer) {
+        timer_del(s->deassert_timer);
+    }
     qemu_set_irq(s->irq_vi_cap, 0);
     qemu_set_irq(s->irq_vi_proc, 0);
     qemu_set_irq(s->irq_vpss, 0);
 }
 
 static const Property hisi_vi_fp_properties[] = {
-    DEFINE_PROP_UINT32("fps", HisiViFpState, fps, 25),
+    /* Default 5 fps — high enough that vendor "wait for next frame"
+     * loops make forward progress, low enough that the IRQ-handler
+     * cost on TCG (~10x native) leaves the guest scheduler some
+     * wall-clock to dispatch userspace.  Override with
+     * `-global hisi-vi-fp.fps=N`. */
+    DEFINE_PROP_UINT32("fps", HisiViFpState, fps, 5),
 };
 
 static void hisi_vi_fp_class_init(ObjectClass *klass, const void *data)
