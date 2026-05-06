@@ -34,6 +34,7 @@
 #include "qemu/timer.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "system/address-spaces.h"
 
 #define TYPE_HISI_VI_FP "hisi-vi-fp"
 OBJECT_DECLARE_SIMPLE_TYPE(HisiViFpState, HISI_VI_FP)
@@ -147,12 +148,64 @@ static const MemoryRegionOps hisi_vi_fp_ops = {
     .valid.max_access_size = 4,
 };
 
+/* "Frame-ready" status pokes — addresses that real silicon raises
+ * before firing the corresponding IRQ.  Reverse-engineered from
+ * /home/john-1/git/openhisilicon/kernel/vi/vi.o:
+ *
+ *   VI_HAL_GetProcIrqStatus(0) returns *(VI_PROC0_BASE + 0x310).
+ *   VI_HAL_IsProcIrqValid(status) returns (status != 0).
+ *   If invalid, VI_COMM_ProcIrqRoute panics at line 1993 — exactly
+ *   what we observed when firing IRQs without populating this register.
+ *
+ * Real-cam value (devmem on openipc-hi3516ev300.dlab.doty.ru, while
+ * Majestic is streaming): 0x06732001 — bit 0 = "frame done", bits 13-26
+ * appear to be a hw timing counter.  The register auto-clears on read.
+ *
+ * Setting any non-zero value satisfies IsProcIrqValid; we use the real
+ * captured value for fidelity. */
+static const struct {
+    hwaddr   addr;
+    uint32_t value;
+    const char *name;
+} hisi_vi_fp_pokes[] = {
+    { 0x11200310, 0x06732001, "VI_PROC0+0x310 (proc IRQ status)" },
+    /* VI_HAL_GetCapIntStatus(0) returns *(VI_CAP0_BASE + 0xF0).
+     * VI_DRV_IsCapValidInt(status) returns ((status & 0xF00) != 0).
+     * If invalid, the kernel decides the IRQ is spurious and after a
+     * few hits disables IRQ #42 — observed before this poke as
+     *   "Disabling IRQ #42"
+     * in dmesg.  Real silicon clears this register on read so it
+     * sampled as 0 over SSH; any value with bits 8-11 set satisfies
+     * the validity check. */
+    { 0x110000F0, 0x00000F00, "VI_CAP0+0xF0   (cap IRQ status, IsCapValidInt mask)" },
+};
+
 static void hisi_vi_fp_tick(void *opaque)
 {
     HisiViFpState *s = HISI_VI_FP(opaque);
+    int i;
 
     if (!s->enable) {
         return;
+    }
+
+    /* Pre-populate hardware status registers the vendor IRQ handlers
+     * read to validate the IRQ is real (otherwise they panic). */
+    for (i = 0; i < ARRAY_SIZE(hisi_vi_fp_pokes); i++) {
+        address_space_stl(&address_space_memory,
+                          hisi_vi_fp_pokes[i].addr,
+                          hisi_vi_fp_pokes[i].value,
+                          MEMTXATTRS_UNSPECIFIED, NULL);
+        if (s->pulses < 3) {
+            uint32_t rb = address_space_ldl(&address_space_memory,
+                                             hisi_vi_fp_pokes[i].addr,
+                                             MEMTXATTRS_UNSPECIFIED, NULL);
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "hisi-vi-fp: poke %s @0x%llx <- 0x%08x readback=0x%08x\n",
+                          hisi_vi_fp_pokes[i].name,
+                          (unsigned long long)hisi_vi_fp_pokes[i].addr,
+                          hisi_vi_fp_pokes[i].value, rb);
+        }
     }
 
     /* GIC SPIs are configured level-sensitive in the vendor DT, so
