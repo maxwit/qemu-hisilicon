@@ -258,6 +258,7 @@ jobs:
             soc: hi3536dv100
             machine: hi3536dv100
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs"
+            ping_linux: true
             uboot_bin: u-boot-hi3536dv100-universal.bin
 
     continue-on-error: ${{ matrix.allow_failure == true }}
