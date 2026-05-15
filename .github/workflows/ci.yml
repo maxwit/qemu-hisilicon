@@ -170,6 +170,210 @@ jobs:
             /tmp/sofia-ci-*/http.log
           retention-days: 7
 
+  maskrom-av300:
+    name: AV300 mask-ROM end-to-end (-bios re.elf)
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfdt1 libglib2.0-0 libpixman-1-0 libslirp0 \
+            gcc-arm-none-eabi make
+
+      - name: Download QEMU binary
+        uses: actions/download-artifact@v4
+        with:
+          name: qemu-arm
+          path: qemu-src/build/
+
+      - name: Make QEMU executable
+        run: chmod +x qemu-src/build/qemu-system-arm
+
+      - name: Checkout openhisilicon (bootrom RE source)
+        uses: actions/checkout@v4
+        with:
+          repository: openipc/openhisilicon
+          path: openhisilicon
+
+      - name: Build hi3516av300 mask-ROM re.elf
+        run: |
+          make -C openhisilicon/bootrom/hi3516av300 build
+          test -f openhisilicon/bootrom/hi3516av300/re.elf
+          ls -la openhisilicon/bootrom/hi3516av300/re.elf
+
+      - name: Verify mask-ROM handshake emission (no host reply)
+        timeout-minutes: 2
+        # Without a 0xAA reply, the bootrom resets in a loop. Each
+        # uart0_wait_start_frame call emits 25× 0x20 then 0x0a (one full
+        # handshake cycle = 26 bytes). The first 26 bytes must match the
+        # exact handshake pattern — that asserts the full chain
+        # _entry → main → fastboot_update → burn_bootloader →
+        # uart0_wait_start_frame → uart0_write(0x20) ran verbatim from
+        # our reverse-engineered source.
+        #
+        # Capture via file-backed chardev rather than -serial stdio.
+        # stdio is block-buffered when stdout is redirected to a file
+        # (CI case, not a TTY), so a slow CI runner that emits only
+        # ~30 bytes before SIGTERM never flushes the 4 KiB stdio buffer
+        # and we see 0 bytes.  -serial file:... writes directly with no
+        # libc buffering.
+        run: |
+          timeout 20 ./qemu-src/build/qemu-system-arm \
+              -M hi3516av300 \
+              -bios openhisilicon/bootrom/hi3516av300/re.elf \
+              -display none -monitor none \
+              -serial file:/tmp/uart-handshake.bin \
+              -serial null -serial null \
+              2>/tmp/qemu-handshake.log || true
+
+          bytes=$(stat -c%s /tmp/uart-handshake.bin)
+          echo "captured: $bytes bytes"
+          if [ "$bytes" -lt 26 ]; then
+            echo "FAIL: too few UART bytes — bootrom did not reach uart0_write"
+            echo "--- qemu stderr ---"
+            cat /tmp/qemu-handshake.log
+            echo "--- first 64 captured bytes (if any) ---"
+            xxd /tmp/uart-handshake.bin
+            exit 1
+          fi
+          head=$(head -c 26 /tmp/uart-handshake.bin | xxd -p | tr -d '\n')
+          # One handshake cycle = 5 outer × 5 inner = 25× uart0_write(0x20)
+          # followed by uart0_write('\n').  26 bytes total = 52 hex chars.
+          expected="202020202020202020202020202020202020202020202020200a"
+          if [ "${head}" != "${expected}" ]; then
+            echo "FAIL: first 26 bytes don't match handshake pattern"
+            echo "got:      ${head}"
+            echo "expected: ${expected}"
+            xxd /tmp/uart-handshake.bin | head -5
+            exit 1
+          fi
+          echo "PASS: bootrom emitted 25× 0x20 + 0x0a handshake pattern"
+
+      - name: Verify mask-ROM advances past handshake on 0xAA reply
+        timeout-minutes: 2
+        # Reply 0xAA mid-handshake.  uart0_wait_start_frame returns 1,
+        # burn_bootloader writes SC_RECOVERY=1 and enters
+        # uart0_recv_payload — which sits silently waiting for frames.
+        #
+        # The bootrom's RX FIFO is flushed at the START of every
+        # uart0_wait_start_frame call (via uart0_flush_rx_fifo()).
+        # So an ACK delivered BEFORE the bootrom reaches that function
+        # gets discarded; it only counts if it arrives DURING the
+        # emit window (between flush and the brief poll moments).
+        # Wall-clock-based timing is therefore fragile across CI
+        # speeds — we use event-driven sending instead: as soon as we
+        # see the first 0x20 emission byte, the bootrom is mid-emit
+        # past the flush, and the next handful of bytes we send will
+        # land in the FIFO during the active poll window.
+        run: |
+          ./qemu-src/build/qemu-system-arm \
+              -M hi3516av300 \
+              -bios openhisilicon/bootrom/hi3516av300/re.elf \
+              -display none -monitor none \
+              -chardev socket,id=uart0,path=/tmp/uart.sock,server=on,wait=on \
+              -serial chardev:uart0 \
+              -serial null -serial null \
+              2>/tmp/qemu-recv.log &
+          QEMU_PID=$!
+          for i in $(seq 1 20); do [ -S /tmp/uart.sock ] && break; sleep 0.5; done
+          if ! [ -S /tmp/uart.sock ]; then
+            echo "FAIL: qemu socket never appeared"
+            cat /tmp/qemu-recv.log
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import socket, time, select, sys
+          s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          s.connect('/tmp/uart.sock')
+          s.setblocking(False)
+
+          # Wait up to 30 s for the first 0x20 handshake byte — that
+          # tells us the bootrom has just passed flush_rx_fifo and is
+          # in the emit-and-poll phase of uart0_wait_start_frame.
+          pre = bytearray()
+          saw_emit = False
+          deadline = time.monotonic() + 30
+          while time.monotonic() < deadline:
+              r, _, _ = select.select([s], [], [], 0.05)
+              if r:
+                  try:
+                      c = s.recv(4096)
+                  except (BlockingIOError, ConnectionError):
+                      continue
+                  if c:
+                      pre.extend(c)
+                      if 0x20 in c:
+                          saw_emit = True
+                          break
+
+          if not saw_emit:
+              print(f"FAIL: never saw a 0x20 byte in {len(pre)} bytes")
+              sys.exit(1)
+
+          # Burst 0xAA over 200 ms — covers multiple poll moments in
+          # the current emit window plus a bit of slack.
+          for _ in range(40):
+              try: s.send(b'\xaa')
+              except (BlockingIOError, ConnectionError): pass
+              time.sleep(0.005)
+
+          # Drain any inflight emission for ~1 s.
+          time.sleep(1)
+          while True:
+              r, _, _ = select.select([s], [], [], 0.05)
+              if not r: break
+              try:
+                  c = s.recv(4096)
+              except (BlockingIOError, ConnectionError):
+                  break
+              if not c: break
+              pre.extend(c)
+
+          # Post-ACK silence window.  If bootrom consumed the ACK and
+          # entered uart0_recv_payload, it stays silent regardless of
+          # CI speed.
+          post = bytearray()
+          end = time.monotonic() + 3
+          while time.monotonic() < end:
+              r, _, _ = select.select([s], [], [], 0.1)
+              if r:
+                  try:
+                      c = s.recv(4096)
+                  except (BlockingIOError, ConnectionError):
+                      break
+                  if c: post.extend(c)
+
+          open('/tmp/uart-pre.bin', 'wb').write(pre)
+          open('/tmp/uart-post.bin', 'wb').write(post)
+          print(f"pre+inflight: {len(pre)} bytes")
+          print(f"post-ACK 3s:  {len(post)} bytes")
+          if len(post) >= 26:
+              print("FAIL: bootrom kept emitting handshakes after 0xAA")
+              sys.exit(1)
+          print("PASS: bootrom consumed 0xAA, advanced into uart0_recv_payload")
+          PY
+
+          kill $QEMU_PID 2>/dev/null; wait $QEMU_PID 2>/dev/null || true
+
+      - name: Upload mask-ROM test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maskrom-av300-log
+          path: |
+            /tmp/uart-handshake.bin
+            /tmp/uart-pre.bin
+            /tmp/uart-post.bin
+            /tmp/qemu-handshake.log
+            /tmp/qemu-recv.log
+            openhisilicon/bootrom/hi3516av300/re.elf
+          retention-days: 7
+
   boot:
     name: Boot ${{ matrix.name }}
     needs: build
