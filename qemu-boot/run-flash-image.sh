@@ -1,5 +1,9 @@
 #!/bin/sh
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+QEMU="$REPO_ROOT/qemu-src/build/qemu-system-arm"
+
 if [ $# -ne 1 ]; then
 	echo "Usage: $0 <flash_image>"
 fi
@@ -24,6 +28,6 @@ esac
 
 # TODO: add non-interactive test cases
 echo "### Running qemu-system-arm -M $soc ... ###"
-qemu-system-arm -M $soc,flash-file=$flash_image \
+$QEMU -M $soc,flash-file=$flash_image \
     -netdev tap,id=net0,ifname=tap0,script=no,downscript=no -net nic,netdev=net0 \
     -nographic
