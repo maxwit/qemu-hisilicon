@@ -1,10 +1,9 @@
 #!/bin/sh -e
 
-set -x
-
 SCRIPT_DIR="$(dirname "$0")"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 QEMU="$REPO_ROOT/qemu-src/build/qemu-system-arm"
+SENSOR=${SENSOR:-gc2053}
 
 if [ $# -ne 1 ]; then
     echo "Usage: $0 <flash_image>"
@@ -32,7 +31,7 @@ esac
 net_opt="-netdev tap,id=net0,ifname=tap0,script=no,downscript=no -net nic,netdev=net0"
 
 # TODO: add non-interactive test cases
-run_qemu="$QEMU -M $soc,flash-file=$flash_image -nographic $net_opt"
+run_qemu="$QEMU -M $soc,flash-file=$flash_image,sensor=$SENSOR -nographic $net_opt"
 
 echo "Running $run_qemu"
 $run_qemu
