@@ -1,5 +1,7 @@
 #!/bin/sh -e
 
+set -x
+
 SCRIPT_DIR="$(dirname "$0")"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 QEMU="$REPO_ROOT/qemu-src/build/qemu-system-arm"
@@ -10,12 +12,13 @@ fi
 
 flash_image=$1
 
-case "$flash_image" in
+fn=$(basename $flash_image)
+case "$fn" in
     *hi351[68][acde]v[0-9][0-9][0-9]*)
-        soc=$(basename $flash_image | grep -o hi351[68][acde]v[0-9][0-9][0-9])
+        soc=$(echo "$fn" | grep -o 'hi351[68][acde]v[0-9][0-9][0-9]')
         ;;
     *gk720[0-9]v[0-9][0-9][0-9]*)
-        soc=$(basename $file_image | grep -o gk720[0-9]v[0-9][0-9][0-9])
+        soc=$(echo "$fn" | grep -o 'gk720[0-9]v[0-9][0-9][0-9]')
         ;;
     *sc6152*)
         soc=gk7205v200
