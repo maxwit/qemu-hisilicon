@@ -34,6 +34,92 @@ echo "Copying HiSilicon SoC sources..."
 
 cp qemu/hw/arm/hisilicon.c          "$QEMU_DIR/hw/arm/"
 cp qemu/include/hw/arm/hisilicon.h  "$QEMU_DIR/include/hw/arm/"
+cp qemu/hw/arm/xiongmai.c           "$QEMU_DIR/hw/arm/"
+cp qemu/include/hw/arm/xiongmai.h   "$QEMU_DIR/include/hw/arm/"
+cp qemu/hw/misc/xm-sfc.c            "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/xm-sysctl.c         "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/xm-ddrc.c           "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/xm-h1.c             "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/hantro-h264.c qemu/hw/misc/hantro-h264.h qemu/hw/misc/hantro-h264-tables.h \
+                                    "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/xm-vi.c             "$QEMU_DIR/hw/misc/"
+cp qemu/hw/i2c/xm-i2c.c             "$QEMU_DIR/hw/i2c/"
+cp qemu/hw/gpio/xm-gpio.c           "$QEMU_DIR/hw/gpio/"
+cp qemu/hw/gpio/xm510-gpio.c        "$QEMU_DIR/hw/gpio/"
+cp qemu/hw/watchdog/arm-sp805.c     "$QEMU_DIR/hw/watchdog/"
+cp qemu/hw/net/xm-dwmac.c           "$QEMU_DIR/hw/net/"
+cp qemu/hw/arm/goke.c               "$QEMU_DIR/hw/arm/"
+cp qemu/include/hw/arm/goke.h       "$QEMU_DIR/include/hw/arm/"
+cp qemu/hw/misc/gk-vic.c            "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/gk-timer.c          "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/gk-wdt.c            "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/gk-sflash.c         "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/gk-ephy.c           "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/gk-remap.c          "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/gk-dma.c            "$QEMU_DIR/hw/misc/"
+cp qemu/hw/i2c/gk-idc.c             "$QEMU_DIR/hw/i2c/"
+cp qemu/hw/arm/anyka.c              "$QEMU_DIR/hw/arm/"
+cp qemu/include/hw/arm/anyka.h      "$QEMU_DIR/include/hw/arm/"
+cp qemu/hw/misc/ak-sysctrl.c        "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/ak-l2.c             "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/ak-ddrc.c           "$QEMU_DIR/hw/misc/"
+cp qemu/include/hw/misc/ak-l2.h     "$QEMU_DIR/include/hw/misc/"
+cp qemu/hw/char/ak-uart.c           "$QEMU_DIR/hw/char/"
+cp qemu/hw/ssi/ak-spi.c             "$QEMU_DIR/hw/ssi/"
+cp qemu/hw/ssi/ak-spinor.c          "$QEMU_DIR/hw/ssi/"
+cp qemu/hw/gpio/ak-gpio.c           "$QEMU_DIR/hw/gpio/"
+cp qemu/hw/usb/ak-usb.c             "$QEMU_DIR/hw/usb/"
+cp qemu/hw/i2c/ak-i2c.c             "$QEMU_DIR/hw/i2c/"
+cp qemu/hw/sd/ak-mci.c              "$QEMU_DIR/hw/sd/"
+cp qemu/hw/arm/sigmastar.c          "$QEMU_DIR/hw/arm/"
+cp qemu/include/hw/arm/sigmastar.h  "$QEMU_DIR/include/hw/arm/"
+cp qemu/hw/misc/sstar-riu.c         "$QEMU_DIR/hw/misc/"
+cp qemu/include/hw/misc/sstar-riu.h "$QEMU_DIR/include/hw/misc/"
+cp qemu/hw/intc/sstar-intc.c        "$QEMU_DIR/hw/intc/"
+cp qemu/hw/timer/sstar-timer.c      "$QEMU_DIR/hw/timer/"
+cp qemu/hw/char/sstar-uart.c        "$QEMU_DIR/hw/char/"
+cp qemu/hw/ssi/sstar-fsp.c          "$QEMU_DIR/hw/ssi/"
+cp qemu/include/hw/ssi/sstar-fsp.h  "$QEMU_DIR/include/hw/ssi/"
+cp qemu/hw/dma/sstar-bdma.c         "$QEMU_DIR/hw/dma/"
+cp qemu/hw/net/sstar-emac.c         "$QEMU_DIR/hw/net/"
+cp qemu/hw/display/mstar-ge.c       "$QEMU_DIR/hw/display/"
+cp qemu/hw/display/mstar-disp.c     "$QEMU_DIR/hw/display/"
+cp qemu/hw/usb/sstar-uhc.c          "$QEMU_DIR/hw/usb/"
+cp qemu/hw/misc/sstar-vpu.c         "$QEMU_DIR/hw/misc/"
+cp qemu/hw/arm/novatek.c            "$QEMU_DIR/hw/arm/"
+cp qemu/hw/arm/nvt-lzma.c           "$QEMU_DIR/hw/arm/"
+cp qemu/include/hw/arm/novatek.h    "$QEMU_DIR/include/hw/arm/"
+cp qemu/include/hw/arm/nvt-lzma.h   "$QEMU_DIR/include/hw/arm/"
+cp qemu/hw/misc/nvt-top.c           "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/nvt-cg.c            "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/nvt-wdt.c           "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/nvt-otp.c           "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/nvt-pwm.c           "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/nvt-crypto.c        "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/nvt-hash.c          "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/nvt-rsa.c           "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/nvt-media.c         "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/nvt-pixel.c         "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/nvt-gfx.c           "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/nvt-audio.c         "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/nvt-h26x.c          "$QEMU_DIR/hw/misc/"
+cp qemu/include/hw/misc/nvt-pixel.h "$QEMU_DIR/include/hw/misc/"
+cp qemu/include/hw/misc/nvt-gfx.h   "$QEMU_DIR/include/hw/misc/"
+cp qemu/include/hw/misc/nvt-cg.h    "$QEMU_DIR/include/hw/misc/"
+cp qemu/include/hw/misc/nvt-h26x.h  "$QEMU_DIR/include/hw/misc/"
+cp qemu/hw/misc/nvt-dai.c           "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/nvt-engine.c        "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/nvt-hdmi.c          "$QEMU_DIR/hw/misc/"
+cp qemu/hw/display/nvt-lcd300.c     "$QEMU_DIR/hw/display/"
+cp qemu/hw/timer/nvt-timer.c        "$QEMU_DIR/hw/timer/"
+cp qemu/hw/gpio/nvt-gpio.c          "$QEMU_DIR/hw/gpio/"
+cp qemu/hw/rtc/nvt-rtc.c            "$QEMU_DIR/hw/rtc/"
+cp qemu/hw/ssi/nvt-flash.c          "$QEMU_DIR/hw/ssi/"
+cp qemu/hw/sd/nvt-sdio.c            "$QEMU_DIR/hw/sd/"
+cp qemu/hw/net/nvt-eqos.c           "$QEMU_DIR/hw/net/"
+cp qemu/hw/usb/nvt-usb.c            "$QEMU_DIR/hw/usb/"
+cp qemu/hw/i2c/nvt-i2c.c            "$QEMU_DIR/hw/i2c/"
+cp qemu/include/hw/ssi/nvt-flash.h  "$QEMU_DIR/include/hw/ssi/"
 cp qemu/include/hw/misc/hisi-fastboot.h "$QEMU_DIR/include/hw/misc/"
 cp qemu/hw/misc/hisi-sysctl.c       "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-crg.c          "$QEMU_DIR/hw/misc/"
@@ -52,6 +138,7 @@ cp qemu/hw/misc/hisi-fastboot.c     "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-gzip.c        "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-l2cache.c     "$QEMU_DIR/hw/misc/"
 cp qemu/hw/misc/hisi-xmsp804.c     "$QEMU_DIR/hw/misc/"
+cp qemu/hw/misc/hisi-ddrc-v1.c     "$QEMU_DIR/hw/misc/"
 cp qemu/hw/net/hisi-femac.c         "$QEMU_DIR/hw/net/"
 cp qemu/hw/net/hisi-gmac.c          "$QEMU_DIR/hw/net/"
 cp qemu/hw/net/hisi-hieth-sf.c      "$QEMU_DIR/hw/net/"
@@ -141,6 +228,318 @@ else
     echo "  hw/arm/meson.build already patched"
 fi
 
+# Xiongmai XM510/XM530/XM550: a family of its own (hw/arm/xiongmai.c), not
+# HiSilicon-derived silicon. One guarded append serves a fresh tree and an
+# existing one alike, since nothing here predates it.
+if ! grep -q "^config XIONGMAI$" "$QEMU_DIR/hw/arm/Kconfig"; then
+    cat >> "$QEMU_DIR/hw/arm/Kconfig" <<'KCONFIG'
+
+config XIONGMAI
+    bool
+    default y
+    depends on TCG && ARM
+    select PL190
+    select PL011
+    select ARM_TIMER
+    select CMSDK_APB_WATCHDOG
+    select HISI_MISC
+    select SDHCI
+    select I2C
+    select HISI_I2C
+    select XM_DWMAC
+KCONFIG
+    echo "  hw/arm/Kconfig: added XIONGMAI"
+fi
+# The DWMAC model serves Goke too: its own symbol, selected by both.
+if ! grep -q "^config XM_DWMAC$" "$QEMU_DIR/hw/net/Kconfig"; then
+    printf '\nconfig XM_DWMAC\n    bool\n' >> "$QEMU_DIR/hw/net/Kconfig"
+    echo "  hw/net/Kconfig: added XM_DWMAC"
+fi
+if ! sed -n '/^config XIONGMAI$/,/^$/p' "$QEMU_DIR/hw/arm/Kconfig" | grep -q XM_DWMAC; then
+    sed -i '/^config XIONGMAI$/,/^$/ s/^    select HISI_I2C$/    select HISI_I2C\n    select XM_DWMAC/' \
+        "$QEMU_DIR/hw/arm/Kconfig"
+    echo "  hw/arm/Kconfig: XIONGMAI selects XM_DWMAC"
+fi
+if ! grep -q xm-sfc "$QEMU_DIR/hw/misc/meson.build"; then
+    echo "system_ss.add(when: 'CONFIG_XIONGMAI', if_true: files('xm-sfc.c'))" \
+        >> "$QEMU_DIR/hw/misc/meson.build"
+    echo "  hw/misc/meson.build: added xm-sfc.c"
+fi
+if ! grep -q xm-sysctl "$QEMU_DIR/hw/misc/meson.build"; then
+    echo "system_ss.add(when: 'CONFIG_XIONGMAI', if_true: files('xm-sysctl.c'))" \
+        >> "$QEMU_DIR/hw/misc/meson.build"
+    echo "  hw/misc/meson.build: added xm-sysctl.c"
+fi
+if ! grep -q xm-ddrc "$QEMU_DIR/hw/misc/meson.build"; then
+    echo "system_ss.add(when: 'CONFIG_XIONGMAI', if_true: files('xm-ddrc.c'))" \
+        >> "$QEMU_DIR/hw/misc/meson.build"
+    echo "  hw/misc/meson.build: added xm-ddrc.c"
+fi
+if ! grep -q xm-h1 "$QEMU_DIR/hw/misc/meson.build"; then
+    echo "system_ss.add(when: 'CONFIG_XIONGMAI', if_true: files('xm-h1.c'))" \
+        >> "$QEMU_DIR/hw/misc/meson.build"
+    echo "  hw/misc/meson.build: added xm-h1.c"
+fi
+if ! grep -q hantro-h264 "$QEMU_DIR/hw/misc/meson.build"; then
+    echo "system_ss.add(when: 'CONFIG_XIONGMAI', if_true: files('hantro-h264.c'))" \
+        >> "$QEMU_DIR/hw/misc/meson.build"
+    echo "  hw/misc/meson.build: added hantro-h264.c"
+fi
+if ! grep -q xm-vi "$QEMU_DIR/hw/misc/meson.build"; then
+    echo "system_ss.add(when: 'CONFIG_XIONGMAI', if_true: files('xm-vi.c'))" \
+        >> "$QEMU_DIR/hw/misc/meson.build"
+    echo "  hw/misc/meson.build: added xm-vi.c"
+fi
+if ! grep -q xm-gpio "$QEMU_DIR/hw/gpio/meson.build"; then
+    echo "system_ss.add(when: 'CONFIG_XIONGMAI', if_true: files('xm-gpio.c'))" \
+        >> "$QEMU_DIR/hw/gpio/meson.build"
+    echo "  hw/gpio/meson.build: added xm-gpio.c"
+fi
+if ! grep -q xm510-gpio "$QEMU_DIR/hw/gpio/meson.build"; then
+    echo "system_ss.add(when: 'CONFIG_XIONGMAI', if_true: files('xm510-gpio.c'))" \
+        >> "$QEMU_DIR/hw/gpio/meson.build"
+    echo "  hw/gpio/meson.build: added xm510-gpio.c"
+fi
+if ! grep -q arm-sp805 "$QEMU_DIR/hw/watchdog/meson.build"; then
+    echo "system_ss.add(when: 'CONFIG_XIONGMAI', if_true: files('arm-sp805.c'))" \
+        >> "$QEMU_DIR/hw/watchdog/meson.build"
+    echo "  hw/watchdog/meson.build: added arm-sp805.c"
+fi
+if ! grep -q xm-i2c "$QEMU_DIR/hw/i2c/meson.build"; then
+    echo "system_ss.add(when: 'CONFIG_XIONGMAI', if_true: files('xm-i2c.c'))" \
+        >> "$QEMU_DIR/hw/i2c/meson.build"
+    echo "  hw/i2c/meson.build: added xm-i2c.c"
+fi
+if ! grep -q xm-dwmac "$QEMU_DIR/hw/net/meson.build"; then
+    echo "system_ss.add(when: 'CONFIG_XM_DWMAC', if_true: files('xm-dwmac.c'))" \
+        >> "$QEMU_DIR/hw/net/meson.build"
+    echo "  hw/net/meson.build: added xm-dwmac.c"
+elif grep -q "CONFIG_XIONGMAI', if_true: files('xm-dwmac.c')" "$QEMU_DIR/hw/net/meson.build"; then
+    sed -i "s/CONFIG_XIONGMAI', if_true: files('xm-dwmac.c')/CONFIG_XM_DWMAC', if_true: files('xm-dwmac.c')/" \
+        "$QEMU_DIR/hw/net/meson.build"
+    echo "  hw/net/meson.build: xm-dwmac.c now under XM_DWMAC"
+fi
+if ! grep -q xiongmai "$QEMU_DIR/hw/arm/meson.build"; then
+    echo "arm_ss.add(when: 'CONFIG_XIONGMAI', if_true: files('xiongmai.c'))" \
+        >> "$QEMU_DIR/hw/arm/meson.build"
+    echo "  hw/arm/meson.build: added xiongmai.c"
+fi
+
+# Goke GK7101/GK7102: Goke's own Ambarella-IP design (hw/arm/goke.c), seen
+# by its software through a register-scrambling HAL. Same guarded appends
+# as Xiongmai, for a fresh tree and an existing one alike.
+if ! grep -q "^config GOKE$" "$QEMU_DIR/hw/arm/Kconfig"; then
+    cat >> "$QEMU_DIR/hw/arm/Kconfig" <<'KCONFIG'
+
+config GOKE
+    bool
+    default y
+    depends on TCG && ARM
+    select SERIAL_MM
+    select OR_IRQ
+    select PTIMER
+    select HISI_MISC
+    select SDHCI
+    select UNIMP
+    select XM_DWMAC
+    select I2C
+    select HISI_I2C
+KCONFIG
+    echo "  hw/arm/Kconfig: added GOKE"
+fi
+for f in gk-vic gk-timer gk-wdt gk-sflash gk-ephy gk-remap gk-dma; do
+    if ! grep -q "'$f.c'" "$QEMU_DIR/hw/misc/meson.build"; then
+        echo "system_ss.add(when: 'CONFIG_GOKE', if_true: files('$f.c'))" \
+            >> "$QEMU_DIR/hw/misc/meson.build"
+        echo "  hw/misc/meson.build: added $f.c"
+    fi
+done
+if ! grep -q "'gk-idc.c'" "$QEMU_DIR/hw/i2c/meson.build"; then
+    echo "system_ss.add(when: 'CONFIG_GOKE', if_true: files('gk-idc.c'))" \
+        >> "$QEMU_DIR/hw/i2c/meson.build"
+    echo "  hw/i2c/meson.build: added gk-idc.c"
+fi
+if ! grep -q "'goke.c'" "$QEMU_DIR/hw/arm/meson.build"; then
+    echo "arm_ss.add(when: 'CONFIG_GOKE', if_true: files('goke.c'))" \
+        >> "$QEMU_DIR/hw/arm/meson.build"
+    echo "  hw/arm/meson.build: added goke.c"
+fi
+
+# Anyka AK39xx: ARM926 camera SoCs (hw/arm/anyka.c).  Same guarded
+# appends as Goke, for a fresh tree and an existing one alike.
+if ! grep -q "^config ANYKA$" "$QEMU_DIR/hw/arm/Kconfig"; then
+    cat >> "$QEMU_DIR/hw/arm/Kconfig" <<'KCONFIG'
+
+config ANYKA
+    bool
+    default y
+    depends on TCG && ARM
+    select PTIMER
+    select HISI_MISC
+    select UNIMP
+    select SSI
+    select I2C
+    select XM_DWMAC
+    select SD
+KCONFIG
+    echo "  hw/arm/Kconfig: added ANYKA"
+else
+    for sym in I2C XM_DWMAC SD; do
+        if ! sed -n '/^config ANYKA$/,/^$/p' "$QEMU_DIR/hw/arm/Kconfig" | \
+                grep -q "select $sym\$"; then
+            sed -i "/^config ANYKA\$/,/^\$/{/select SSI\$/a\\    select $sym
+}" "$QEMU_DIR/hw/arm/Kconfig"
+            echo "  hw/arm/Kconfig: ANYKA now selects $sym"
+        fi
+    done
+fi
+for f in misc/ak-sysctrl misc/ak-l2 misc/ak-ddrc char/ak-uart ssi/ak-spi ssi/ak-spinor gpio/ak-gpio usb/ak-usb i2c/ak-i2c sd/ak-mci; do
+    if ! grep -q "'${f#*/}.c'" "$QEMU_DIR/hw/${f%/*}/meson.build"; then
+        echo "system_ss.add(when: 'CONFIG_ANYKA', if_true: files('${f#*/}.c'))" \
+            >> "$QEMU_DIR/hw/${f%/*}/meson.build"
+        echo "  hw/${f%/*}/meson.build: added ${f#*/}.c"
+    fi
+done
+if ! grep -q "'anyka.c'" "$QEMU_DIR/hw/arm/meson.build"; then
+    echo "arm_ss.add(when: 'CONFIG_ANYKA', if_true: files('anyka.c'))" \
+        >> "$QEMU_DIR/hw/arm/meson.build"
+    echo "  hw/arm/meson.build: added anyka.c"
+fi
+
+# SigmaStar (MStar) ARMv7: Cortex-A7 SoCs behind the RIU (hw/arm/sigmastar.c).
+# Same guarded appends as Anyka, for a fresh tree and an existing one alike.
+if ! grep -q "^config SIGMASTAR$" "$QEMU_DIR/hw/arm/Kconfig"; then
+    cat >> "$QEMU_DIR/hw/arm/Kconfig" <<'KCONFIG'
+
+config SIGMASTAR
+    bool
+    default y
+    depends on TCG && ARM
+    select A15MPCORE
+    select ARM_GIC
+    select SERIAL_MM
+    select UNIMP
+    select USB_EHCI_SYSBUS
+    select AHCI_SYSBUS
+KCONFIG
+    echo "  hw/arm/Kconfig: added SIGMASTAR"
+else
+    for sym in A15MPCORE ARM_GIC SERIAL_MM UNIMP USB_EHCI_SYSBUS AHCI_SYSBUS; do
+        if ! sed -n '/^config SIGMASTAR$/,/^$/p' "$QEMU_DIR/hw/arm/Kconfig" | \
+                grep -q "select $sym\$"; then
+            sed -i "/^config SIGMASTAR\$/,/^\$/{/depends on TCG \&\& ARM\$/a\\    select $sym
+}" "$QEMU_DIR/hw/arm/Kconfig"
+            echo "  hw/arm/Kconfig: SIGMASTAR now selects $sym"
+        fi
+    done
+fi
+for f in misc/sstar-riu intc/sstar-intc timer/sstar-timer char/sstar-uart ssi/sstar-fsp dma/sstar-bdma net/sstar-emac display/mstar-ge display/mstar-disp usb/sstar-uhc; do
+    if ! grep -q "'${f#*/}.c'" "$QEMU_DIR/hw/${f%/*}/meson.build"; then
+        echo "system_ss.add(when: 'CONFIG_SIGMASTAR', if_true: files('${f#*/}.c'))" \
+            >> "$QEMU_DIR/hw/${f%/*}/meson.build"
+        echo "  hw/${f%/*}/meson.build: added ${f#*/}.c"
+    fi
+done
+# The VPU model decodes with libavcodec when it is there (pkg-config), and
+# answers its registers without pictures when it is not (FFmpeg 4.0 or
+# later, libavcodec 58: the send/receive API).  (The define
+# reaches every system_ss file; only sstar-vpu.c looks at it.)
+if ! grep -q "'sstar-vpu.c'" "$QEMU_DIR/hw/misc/meson.build"; then
+    cat >> "$QEMU_DIR/hw/misc/meson.build" <<'MESON'
+sstar_avcodec = dependency('libavcodec', version: '>=58', required: false)
+sstar_avutil = dependency('libavutil', version: '>=56', required: false)
+if sstar_avcodec.found() and sstar_avutil.found()
+  system_ss.add(when: 'CONFIG_SIGMASTAR', if_true: [files('sstar-vpu.c'),
+    sstar_avcodec, sstar_avutil,
+    declare_dependency(compile_args: '-DSSTAR_VPU_LIBAVCODEC')])
+else
+  system_ss.add(when: 'CONFIG_SIGMASTAR', if_true: files('sstar-vpu.c'))
+endif
+MESON
+    echo "  hw/misc/meson.build: added sstar-vpu.c"
+fi
+# ... and a tree configured before the FFmpeg version floor gets it
+if grep -q "dependency('libavcodec', required: false)" \
+        "$QEMU_DIR/hw/misc/meson.build"; then
+    sed -i "s/dependency('libavcodec', required: false)/dependency('libavcodec', version: '>=58', required: false)/; s/dependency('libavutil', required: false)/dependency('libavutil', version: '>=56', required: false)/" \
+        "$QEMU_DIR/hw/misc/meson.build"
+    echo "  hw/misc/meson.build: FFmpeg 4.0 floor for sstar-vpu"
+fi
+if ! grep -q "'sigmastar.c'" "$QEMU_DIR/hw/arm/meson.build"; then
+    echo "arm_ss.add(when: 'CONFIG_SIGMASTAR', if_true: files('sigmastar.c'))" \
+        >> "$QEMU_DIR/hw/arm/meson.build"
+    echo "  hw/arm/meson.build: added sigmastar.c"
+fi
+
+# Novatek NT9856x (NA51089): Cortex-A9 camera SoCs (hw/arm/novatek.c).
+# Same guarded appends as SigmaStar, for a fresh tree and an existing one
+# alike.
+if ! grep -q "^config NOVATEK$" "$QEMU_DIR/hw/arm/Kconfig"; then
+    cat >> "$QEMU_DIR/hw/arm/Kconfig" <<'KCONFIG'
+
+config NOVATEK
+    bool
+    default y
+    depends on TCG && ARM
+    select A9MPCORE
+    select ARM_GIC
+    select PL310
+    select PTIMER
+    select SERIAL_MM
+    select UNIMP
+    select HISI_MISC
+    select SD
+    select USB_EHCI_SYSBUS
+    select HISI_I2C
+    select AHCI_SYSBUS
+KCONFIG
+    echo "  hw/arm/Kconfig: added NOVATEK"
+else
+    for sym in A9MPCORE ARM_GIC PL310 PTIMER SERIAL_MM UNIMP HISI_MISC SD USB_EHCI_SYSBUS HISI_I2C AHCI_SYSBUS; do
+        if ! sed -n '/^config NOVATEK$/,/^$/p' "$QEMU_DIR/hw/arm/Kconfig" | \
+                grep -q "select $sym\$"; then
+            sed -i "/^config NOVATEK\$/,/^\$/{/depends on TCG \&\& ARM\$/a\\    select $sym
+}" "$QEMU_DIR/hw/arm/Kconfig"
+            echo "  hw/arm/Kconfig: NOVATEK now selects $sym"
+        fi
+    done
+fi
+for f in misc/nvt-top misc/nvt-cg misc/nvt-wdt misc/nvt-otp misc/nvt-pwm misc/nvt-crypto misc/nvt-hash misc/nvt-rsa misc/nvt-media misc/nvt-pixel misc/nvt-gfx misc/nvt-audio misc/nvt-dai misc/nvt-engine misc/nvt-hdmi display/nvt-lcd300 timer/nvt-timer gpio/nvt-gpio rtc/nvt-rtc ssi/nvt-flash sd/nvt-sdio net/nvt-eqos usb/nvt-usb i2c/nvt-i2c; do
+    if ! grep -q "'${f#*/}.c'" "$QEMU_DIR/hw/${f%/*}/meson.build"; then
+        echo "system_ss.add(when: 'CONFIG_NOVATEK', if_true: files('${f#*/}.c'))" \
+            >> "$QEMU_DIR/hw/${f%/*}/meson.build"
+        echo "  hw/${f%/*}/meson.build: added ${f#*/}.c"
+    fi
+done
+# The H.26x engine codes its pictures with x264 / x265 when pkg-config
+# finds them, and writes filler slices when it does not (nvt-h26x.c).
+# (The defines reach every system_ss file; only nvt-h26x.c looks.)
+if ! grep -q "'nvt-h26x.c'" "$QEMU_DIR/hw/misc/meson.build"; then
+    cat >> "$QEMU_DIR/hw/misc/meson.build" <<'MESON'
+nvt_x264 = dependency('x264', required: false)
+nvt_x265 = dependency('x265', required: false)
+nvt_h26x = [files('nvt-h26x.c')]
+if nvt_x264.found()
+  nvt_h26x += [nvt_x264, declare_dependency(compile_args: '-DNVT_H26X_X264')]
+endif
+if nvt_x265.found()
+  nvt_h26x += [nvt_x265, declare_dependency(compile_args: '-DNVT_H26X_X265')]
+endif
+system_ss.add(when: 'CONFIG_NOVATEK', if_true: nvt_h26x)
+MESON
+    echo "  hw/misc/meson.build: added nvt-h26x.c"
+fi
+if ! grep -q "'novatek.c'" "$QEMU_DIR/hw/arm/meson.build"; then
+    echo "arm_ss.add(when: 'CONFIG_NOVATEK', if_true: files('novatek.c'))" \
+        >> "$QEMU_DIR/hw/arm/meson.build"
+    echo "  hw/arm/meson.build: added novatek.c"
+fi
+if ! grep -q "'nvt-lzma.c'" "$QEMU_DIR/hw/arm/meson.build"; then
+    echo "arm_ss.add(when: 'CONFIG_NOVATEK', if_true: files('nvt-lzma.c'))" \
+        >> "$QEMU_DIR/hw/arm/meson.build"
+    echo "  hw/arm/meson.build: added nvt-lzma.c"
+fi
+
 # hw/misc/Kconfig
 if ! grep -q HISI_MISC "$QEMU_DIR/hw/misc/Kconfig"; then
     cat >> "$QEMU_DIR/hw/misc/Kconfig" <<'KCONFIG'
@@ -155,7 +554,7 @@ fi
 
 # hw/misc/meson.build
 if ! grep -q hisi-sysctl "$QEMU_DIR/hw/misc/meson.build"; then
-    echo "system_ss.add(when: 'CONFIG_HISI_MISC', if_true: files('hisi-sysctl.c', 'hisi-crg.c', 'hisi-fmc.c', 'hisi-sfc350.c', 'hisi-himci.c', 'hisi-regbank.c', 'hisi-vedu.c', 'hisi-mipi-rx.c', 'hisi-rtc.c', 'hisi-ive.c', 'hisi-nnie.c', 'hisi-fastboot.c', 'hisi-gzip.c', 'hisi-hwrng.c', 'hisi-vi-fp.c', 'hisi-l2cache.c', 'hisi-xmsp804.c'))" \
+    echo "system_ss.add(when: 'CONFIG_HISI_MISC', if_true: files('hisi-sysctl.c', 'hisi-crg.c', 'hisi-fmc.c', 'hisi-sfc350.c', 'hisi-himci.c', 'hisi-regbank.c', 'hisi-vedu.c', 'hisi-mipi-rx.c', 'hisi-rtc.c', 'hisi-ive.c', 'hisi-nnie.c', 'hisi-fastboot.c', 'hisi-gzip.c', 'hisi-hwrng.c', 'hisi-vi-fp.c', 'hisi-l2cache.c', 'hisi-xmsp804.c', 'hisi-ddrc-v1.c'))" \
         >> "$QEMU_DIR/hw/misc/meson.build"
     echo "  patched hw/misc/meson.build"
 else
@@ -183,6 +582,11 @@ else
         sed -i "s/'hisi-l2cache.c'/'hisi-l2cache.c', 'hisi-xmsp804.c'/" \
             "$QEMU_DIR/hw/misc/meson.build"
         echo "  hw/misc/meson.build: added hisi-xmsp804.c"
+    fi
+    if ! grep -q hisi-ddrc-v1 "$QEMU_DIR/hw/misc/meson.build"; then
+        sed -i "s/'hisi-xmsp804.c'/'hisi-xmsp804.c', 'hisi-ddrc-v1.c'/" \
+            "$QEMU_DIR/hw/misc/meson.build"
+        echo "  hw/misc/meson.build: added hisi-ddrc-v1.c"
     fi
 fi
 

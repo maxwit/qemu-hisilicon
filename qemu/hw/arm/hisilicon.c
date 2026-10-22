@@ -47,6 +47,8 @@
 #include "hw/qdev-clock.h"
 #include "target/arm/cpu-qom.h"
 #include "target/arm/gtimer.h"
+#include "target/arm/arm-powerctl.h"
+#include "target/arm/cpu.h"
 #include <libfdt.h>
 #include "hw/loader.h"
 #include <zlib.h>  /* crc32() for uImage header fixup */
@@ -106,6 +108,10 @@
  *   V5:        0x11xxxxxx peripherals, GIC @ 0x124xxxxx, RAM @ 0x40000000
  */
 
+/* V1 DDR controller and DDR PHY (inside the misc block), see hisi-ddrc-v1 */
+#define HISI_V1_DDRC_BASE       0x20110000
+#define HISI_V1_DDRPHY_BASE     0x20120400
+
 /*
  * Hi3516CV100 (V1): pre-2015, 2M mainstream.  ARM926EJ-S @550MHz.
  * Video: H.264, 1080P@30fps.  Memory: 64MB DDR2.
@@ -134,6 +140,7 @@ static const HisiSoCConfig hi3516cv100_soc = {
                           "mmz=anonymous,0,0x82000000,32M",
 
     .ram_base           = 0x80000000,
+    .v1_xip_boot        = true,         /* reg_info brings DDR up */
     .sram_base          = 0x04010000,
     .sram_size          = 64 * KiB,
 
@@ -142,6 +149,8 @@ static const HisiSoCConfig hi3516cv100_soc = {
 
     .sysctl_base        = 0x20050000,
     .crg_base           = 0x20030000,
+    .crg_pll_lock_offset = 0xe8,        /* 4 PLL lock bits */
+    .crg_pll_lock_bits  = 0xf,
 
     .num_uarts          = 3,
     .uart_bases         = { 0x20080000, 0x20090000, 0x200A0000 },
@@ -150,7 +159,7 @@ static const HisiSoCConfig hi3516cv100_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x20000000, 0x20010000 },
     .timer_irqs         = { 3, 4 },
-    .timer_freq         = 50000000,     /* 50 MHz (AXI 100MHz / prescale 2) */
+    .timer_freq         = 110000000,    /* BPLL 220 MHz bus / prescale 2 */
 
     .num_spis           = 2,
     .spi_bases          = { 0x200C0000, 0x200E0000 },
@@ -185,21 +194,24 @@ static const HisiSoCConfig hi3516cv100_soc = {
     .wdt_freq           = 3000000,
 
     /*
-     * PLL register defaults.
+     * PLL register defaults: what the OpenIPC U-Boot reg_info table writes,
+     * read back from a Hi3516CV100 board (lab hi3516cv100-imx122, CRG0..
+     * CRG5 and the CRG+0xe8 lock word).  A flash boot now runs that table
+     * (v1_xip_boot), so these have to agree with it or the kernel would
+     * derive one timer clock on a -kernel boot and another after U-Boot.
      * Kernel computes: clk = 24M * fbdiv / (2 * refdiv * pstdiv1 * pstdiv2)
      *
-     * APLL (CRG0/CRG1): CPU clock ~552 MHz.
-     *   pstdiv1=1, pstdiv2=1, refdiv=1, fbdiv=46: 24*46/2 = 552 MHz.
-     * BPLL (CRG4/CRG5): AXI bus clock 100 MHz.
-     *   pstdiv1=1, pstdiv2=1, refdiv=3, fbdiv=25: 24*25/6 = 100 MHz.
-     *   Timer clock = busclk / prescale(2) = 50 MHz.
+     * BPLL (CRG4/CRG5): pstdiv1=1, pstdiv2=2, refdiv=3, fbdiv=110:
+     *   24*110/12 = 220 MHz bus.  Timer clock = busclk / prescale(2) =
+     *   110 MHz; that board's kernel prints "sched_clock: 32 bits at
+     *   110MHz".  APLL (CRG0/CRG1) carries the same words.
      */
     .num_crg_defaults   = 4,
     .crg_defaults       = {
-        { 0x00, (1 << 24) | (1 << 27) },   /* CRG0: pstdiv1=1, pstdiv2=1 */
-        { 0x04, (1 << 12) | 46 },           /* CRG1: refdiv=1, fbdiv=46 */
-        { 0x10, (1 << 24) | (1 << 27) },   /* CRG4: pstdiv1=1, pstdiv2=1 */
-        { 0x14, (3 << 12) | 25 },           /* CRG5: refdiv=3, fbdiv=25 */
+        { 0x00, 0x11000000 },               /* CRG0: APLL post dividers */
+        { 0x04, 0x0068306e },               /* CRG1: APLL refdiv/fbdiv  */
+        { 0x10, 0x11000000 },               /* CRG4: BPLL post dividers */
+        { 0x14, 0x0068306e },               /* CRG5: BPLL refdiv/fbdiv  */
     },
 
     /*
@@ -207,10 +219,9 @@ static const HisiSoCConfig hi3516cv100_soc = {
      * hardware during init.  Without mapped regions, reads return 0
      * from QEMU's "unimplemented" handler, causing poll loops to hang.
      */
-    .num_regbanks       = 8,
+    .num_regbanks       = 7,     /* DDRC: hisi-ddrc-v1 */
     .regbanks           = {
         { "hisi-misc",   0x20120000, 0x10000 },
-        { "hisi-ddr",    0x20110000, 0x10000 },
         { "hisi-pwm",    0x20130000, 0x10000 },
         { "hisi-nandc",  0x10000000, 0x10000 },
         { "hisi-viu",    0x20580000, 0x40000 },
@@ -241,6 +252,7 @@ static const HisiSoCConfig hi3518av100_soc = {
                           "mmz=anonymous,0,0x82000000,32M",
 
     .ram_base           = 0x80000000,
+    .v1_xip_boot        = true,         /* reg_info brings DDR up */
     .sram_base          = 0x04010000,
     .sram_size          = 64 * KiB,
 
@@ -249,6 +261,8 @@ static const HisiSoCConfig hi3518av100_soc = {
 
     .sysctl_base        = 0x20050000,
     .crg_base           = 0x20030000,
+    .crg_pll_lock_offset = 0xe8,        /* 4 PLL lock bits */
+    .crg_pll_lock_bits  = 0xf,
 
     .num_uarts          = 3,
     .uart_bases         = { 0x20080000, 0x20090000, 0x200A0000 },
@@ -257,7 +271,7 @@ static const HisiSoCConfig hi3518av100_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x20000000, 0x20010000 },
     .timer_irqs         = { 3, 4 },
-    .timer_freq         = 50000000,
+    .timer_freq         = 100000000,    /* BPLL 200 MHz bus / prescale 2 */
 
     .num_spis           = 2,
     .spi_bases          = { 0x200C0000, 0x200E0000 },
@@ -290,18 +304,27 @@ static const HisiSoCConfig hi3518av100_soc = {
     .wdt_irq            = -1,
     .wdt_freq           = 3000000,
 
+    /*
+     * PLL defaults: the words this SoC's reg_info table writes, so a
+     * -kernel boot and a flash boot (which runs the table) give the
+     * kernel the same clocks.  OpenIPC/u-boot-hi3516cv100's hi3518cv100
+     * and hi3518ev100 tables, and HiSilicon's SDK reg_info_hi3518a.bin,
+     * all program BPLL CRG4/CRG5 = 0x11000000/0x00683064: refdiv=3,
+     * fbdiv=100, pstdiv 1/2 -> 24*100/12 = 200 MHz bus, so the timer runs
+     * at 100 MHz (hi3516cv100's fbdiv=110 gives its 110 MHz).  From the
+     * tables, not read back from a board.
+     */
     .num_crg_defaults   = 4,
     .crg_defaults       = {
-        { 0x00, (1 << 24) | (1 << 27) },
-        { 0x04, (1 << 12) | 46 },
-        { 0x10, (1 << 24) | (1 << 27) },
-        { 0x14, (3 << 12) | 25 },
+        { 0x00, 0x11000000 },               /* CRG0: APLL post dividers */
+        { 0x04, 0x0068306e },               /* CRG1: APLL refdiv/fbdiv  */
+        { 0x10, 0x11000000 },               /* CRG4: BPLL post dividers */
+        { 0x14, 0x00683064 },               /* CRG5: BPLL refdiv/fbdiv  */
     },
 
-    .num_regbanks       = 8,
+    .num_regbanks       = 7,     /* DDRC: hisi-ddrc-v1 */
     .regbanks           = {
         { "hisi-misc",   0x20120000, 0x10000 },
-        { "hisi-ddr",    0x20110000, 0x10000 },
         { "hisi-pwm",    0x20130000, 0x10000 },
         { "hisi-nandc",  0x10000000, 0x10000 },
         { "hisi-viu",    0x20580000, 0x40000 },
@@ -329,6 +352,7 @@ static const HisiSoCConfig hi3518cv100_soc = {
                           "mmz=anonymous,0,0x82000000,32M",
 
     .ram_base           = 0x80000000,
+    .v1_xip_boot        = true,         /* reg_info brings DDR up */
     .sram_base          = 0x04010000,
     .sram_size          = 64 * KiB,
 
@@ -337,6 +361,8 @@ static const HisiSoCConfig hi3518cv100_soc = {
 
     .sysctl_base        = 0x20050000,
     .crg_base           = 0x20030000,
+    .crg_pll_lock_offset = 0xe8,        /* 4 PLL lock bits */
+    .crg_pll_lock_bits  = 0xf,
 
     .num_uarts          = 3,
     .uart_bases         = { 0x20080000, 0x20090000, 0x200A0000 },
@@ -345,7 +371,7 @@ static const HisiSoCConfig hi3518cv100_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x20000000, 0x20010000 },
     .timer_irqs         = { 3, 4 },
-    .timer_freq         = 50000000,
+    .timer_freq         = 100000000,    /* BPLL 200 MHz bus / prescale 2 */
 
     .num_spis           = 2,
     .spi_bases          = { 0x200C0000, 0x200E0000 },
@@ -378,18 +404,27 @@ static const HisiSoCConfig hi3518cv100_soc = {
     .wdt_irq            = -1,
     .wdt_freq           = 3000000,
 
+    /*
+     * PLL defaults: the words this SoC's reg_info table writes, so a
+     * -kernel boot and a flash boot (which runs the table) give the
+     * kernel the same clocks.  OpenIPC/u-boot-hi3516cv100's hi3518cv100
+     * and hi3518ev100 tables, and HiSilicon's SDK reg_info_hi3518a.bin,
+     * all program BPLL CRG4/CRG5 = 0x11000000/0x00683064: refdiv=3,
+     * fbdiv=100, pstdiv 1/2 -> 24*100/12 = 200 MHz bus, so the timer runs
+     * at 100 MHz (hi3516cv100's fbdiv=110 gives its 110 MHz).  From the
+     * tables, not read back from a board.
+     */
     .num_crg_defaults   = 4,
     .crg_defaults       = {
-        { 0x00, (1 << 24) | (1 << 27) },
-        { 0x04, (1 << 12) | 46 },
-        { 0x10, (1 << 24) | (1 << 27) },
-        { 0x14, (3 << 12) | 25 },
+        { 0x00, 0x11000000 },               /* CRG0: APLL post dividers */
+        { 0x04, 0x0068306e },               /* CRG1: APLL refdiv/fbdiv  */
+        { 0x10, 0x11000000 },               /* CRG4: BPLL post dividers */
+        { 0x14, 0x00683064 },               /* CRG5: BPLL refdiv/fbdiv  */
     },
 
-    .num_regbanks       = 8,
+    .num_regbanks       = 7,     /* DDRC: hisi-ddrc-v1 */
     .regbanks           = {
         { "hisi-misc",   0x20120000, 0x10000 },
-        { "hisi-ddr",    0x20110000, 0x10000 },
         { "hisi-pwm",    0x20130000, 0x10000 },
         { "hisi-nandc",  0x10000000, 0x10000 },
         { "hisi-viu",    0x20580000, 0x40000 },
@@ -419,6 +454,7 @@ static const HisiSoCConfig hi3518ev100_soc = {
                           "mmz=anonymous,0,0x82000000,32M",
 
     .ram_base           = 0x80000000,
+    .v1_xip_boot        = true,         /* reg_info brings DDR up */
     .sram_base          = 0x04010000,
     .sram_size          = 64 * KiB,
 
@@ -427,6 +463,8 @@ static const HisiSoCConfig hi3518ev100_soc = {
 
     .sysctl_base        = 0x20050000,
     .crg_base           = 0x20030000,
+    .crg_pll_lock_offset = 0xe8,        /* 4 PLL lock bits */
+    .crg_pll_lock_bits  = 0xf,
 
     .num_uarts          = 3,
     .uart_bases         = { 0x20080000, 0x20090000, 0x200A0000 },
@@ -435,7 +473,7 @@ static const HisiSoCConfig hi3518ev100_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x20000000, 0x20010000 },
     .timer_irqs         = { 3, 4 },
-    .timer_freq         = 50000000,
+    .timer_freq         = 100000000,    /* BPLL 200 MHz bus / prescale 2 */
 
     .num_spis           = 2,
     .spi_bases          = { 0x200C0000, 0x200E0000 },
@@ -468,18 +506,27 @@ static const HisiSoCConfig hi3518ev100_soc = {
     .wdt_irq            = -1,
     .wdt_freq           = 3000000,
 
+    /*
+     * PLL defaults: the words this SoC's reg_info table writes, so a
+     * -kernel boot and a flash boot (which runs the table) give the
+     * kernel the same clocks.  OpenIPC/u-boot-hi3516cv100's hi3518cv100
+     * and hi3518ev100 tables, and HiSilicon's SDK reg_info_hi3518a.bin,
+     * all program BPLL CRG4/CRG5 = 0x11000000/0x00683064: refdiv=3,
+     * fbdiv=100, pstdiv 1/2 -> 24*100/12 = 200 MHz bus, so the timer runs
+     * at 100 MHz (hi3516cv100's fbdiv=110 gives its 110 MHz).  From the
+     * tables, not read back from a board.
+     */
     .num_crg_defaults   = 4,
     .crg_defaults       = {
-        { 0x00, (1 << 24) | (1 << 27) },
-        { 0x04, (1 << 12) | 46 },
-        { 0x10, (1 << 24) | (1 << 27) },
-        { 0x14, (3 << 12) | 25 },
+        { 0x00, 0x11000000 },               /* CRG0: APLL post dividers */
+        { 0x04, 0x0068306e },               /* CRG1: APLL refdiv/fbdiv  */
+        { 0x10, 0x11000000 },               /* CRG4: BPLL post dividers */
+        { 0x14, 0x00683064 },               /* CRG5: BPLL refdiv/fbdiv  */
     },
 
-    .num_regbanks       = 8,
+    .num_regbanks       = 7,     /* DDRC: hisi-ddrc-v1 */
     .regbanks           = {
         { "hisi-misc",   0x20120000, 0x10000 },
-        { "hisi-ddr",    0x20110000, 0x10000 },
         { "hisi-pwm",    0x20130000, 0x10000 },
         { "hisi-nandc",  0x10000000, 0x10000 },
         { "hisi-viu",    0x20580000, 0x40000 },
@@ -845,7 +892,8 @@ static const HisiSoCConfig hi3516cv300_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 3, 4 },
-    .timer_freq         = 24000000,     /* 24 MHz */
+    .timer_freq         = 3000000,      /* kernel: "sched_clock: 32 bits at
+                                         * 3000kHz", -kernel and U-Boot alike */
 
     .num_spis           = 2,
     .spi_bases          = { 0x12120000, 0x12121000 },
@@ -876,6 +924,94 @@ static const HisiSoCConfig hi3516cv300_soc = {
     .wdt_irq            = -1,
     .wdt_freq           = 3000000,
 };
+
+/*
+ * Hi3516EV100 (V3): the 1M sibling of Hi3516CV300 -- the same die, peripheral
+ * map, boot ROM and SDK; 64 MiB of in-package DDR.  It identifies itself only
+ * by the sub-variant byte of SCSYSID0 (4; 0 is CV300), which ipctool and the
+ * vendor sys.ko read.  OpenIPC builds it from the cv300 tree (U-Boot
+ * hi3516ev100_config, kernel hisilicon-hi3516cv300, the same DT).
+ */
+static const HisiSoCConfig hi3516ev100_soc = {
+    .name               = "hi3516ev100",
+    .desc               = "HiSilicon Hi3516EV100 (ARM926EJ-S)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("arm926"),
+    .soc_id             = HISI_SOC_ID_CV300,
+    .chipid_byte_layout = true,            /* V3: byte-wise SCSYSID0..3 */
+    .chip_variant       = 4,               /* SCSYSID0[31:24] = 4 -> "3516EV100" */
+    .default_sensor     = "imx291",        /* Sony 1080p Starvis on V3 ref boards */
+    .hwrng_base         = 0x120C0000,      /* HISEC_TRNG_CTRL (V3) */
+    .hwrng_data_offset  = 0x204,
+    /* EV100 is the CV300 die in a 64 MiB SiP package (DDR2 512 Mb):
+     * kernel 32 MiB, vendor mmz.ko the upper 32 MiB at 0x82000000.
+     * No mmz= injected, as on CV300 (see there). */
+    .ram_size_default   = 64 * MiB,
+    .kernel_mem_mb      = 32,
+    .extra_cmdline      = NULL,
+
+    .ram_base           = 0x80000000,
+    .sram_base          = 0x04010000,
+    .sram_size          = 64 * KiB,
+
+    .use_gic            = false,
+    .vic_base           = 0x10040000,
+
+    .sysctl_base        = 0x12020000,
+    .crg_base           = 0x12010000,
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x12100000, 0x12101000, 0x12102000 },
+    .uart_irqs          = { 5, 30, 25 },
+
+    .num_timers         = 2,
+    .timer_bases        = { 0x12000000, 0x12001000 },
+    .timer_irqs         = { 3, 4 },
+    .timer_freq         = 3000000,      /* kernel: "sched_clock: 32 bits at
+                                         * 3000kHz", -kernel and U-Boot alike */
+
+    .num_spis           = 2,
+    .spi_bases          = { 0x12120000, 0x12121000 },
+    .spi_irqs           = { 6, 7 },
+
+    .fmc_ctrl_base      = 0x10000000,
+    .fmc_mem_base       = 0x14000000,
+
+    .gpio_base          = 0x12140000,
+    .gpio_count         = 9,
+    .gpio_stride        = 0x1000,
+    .gpio_irq           = 31,           /* shared for all ports (VIC) */
+
+    .dma_base           = 0x10030000,
+    .dma_irq            = 14,
+
+    .femac_base         = 0x10050000,
+    .femac_irq          = 12,
+
+    .num_i2c            = 2,
+    .i2c_bases          = { 0x12110000, 0x12112000 },
+
+    .num_himci          = 3,
+    .himci_bases        = { 0x100c0000, 0x100d0000, 0x100e0000 },
+    .himci_irqs         = { 18, 27, 27 },
+
+    .wdt_base           = 0x12080000,
+    .wdt_irq            = -1,
+    .wdt_freq           = 3000000,
+};
+
+/*
+ * Timer clocks of the Hi3516EV200/EV300 SDK family (EV200, EV300, 18EV300,
+ * DV200 and their Goke rebrands) and of the CV500/AV300/DV300 SDK.  Their
+ * DTS clock the SP804s (arm,sp804 / hisilicon,hisp804) from the fixed 3 MHz
+ * clock (clk_3m, or CRG HI35xx_FIXED_3M) and declare the arm,armv7-timer at
+ * clock-frequency = 50 MHz.  Left at QEMU's defaults (SP804 1 MHz, generic
+ * timer 62.5 MHz) the guest clock ran at 1/3 speed where hisp804 is the
+ * clocksource (CV500/AV300/DV300) and 1.25x where arch_sys_counter is
+ * (EV200/EV300).
+ */
+#define HISI_V4_TIMER_CLOCKS                                \
+    .timer_freq         = 3000000,                          \
+    .arch_timer_freq    = 50000000
 
 /*
  * Hi3516CV500 (V3.5): 2018, 3M smart-vision.  Dual Cortex-A7 @900MHz.
@@ -923,6 +1059,7 @@ static const HisiSoCConfig hi3516cv500_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 1, 2 },
+    HISI_V4_TIMER_CLOCKS,
 
     .num_spis           = 3,
     .spi_bases          = { 0x120C0000, 0x120C1000, 0x120C2000 },
@@ -949,6 +1086,9 @@ static const HisiSoCConfig hi3516cv500_soc = {
     .num_i2c            = 7,
     .i2c_bases          = { 0x120B0000, 0x120B1000, 0x120B2000, 0x120B3000,
                             0x120B5000, 0x120B6000, 0x120B7000 },
+    /* I2C0-3 are SPI 11-14, I2C5-7 SPI 77-79 (Hi3516CV500/AV300/DV300 data
+     * sheets' interrupt table; OpenIPC/linux hisilicon-hi3516cv500 #94). */
+    .i2c_irqs           = { 11, 12, 13, 14, 77, 78, 79 },
 
     .mipi_rx_base       = 0x113A0000,
     .mipi_rx_irq        = 57,
@@ -965,7 +1105,7 @@ static const HisiSoCConfig hi3516cv500_soc = {
     .wdt_irq            = -1,
     .wdt_freq           = 3000000,
 
-    .num_crg_defaults   = 4,
+    .num_crg_defaults   = 3,
     .crg_defaults       = {
         { 0x1B8, (1 << 0) | (1 << 1) | (1 << 2) | (1 << 18)
                | (1 << 11) | (1 << 12) | (1 << 13)
@@ -975,8 +1115,6 @@ static const HisiSoCConfig hi3516cv500_soc = {
                                          * + UART0 mux 24MHz */
         { 0x144, 0x02 },               /* FMC clock enable */
         { 0x16C, 0x02 },               /* ETH clock enable */
-        { 0x78,  (1 << 2) | (1 << 4) },
-                                        /* CPU1 + DBG1 in reset (kernel clears bit 2 for SMP) */
     },
 
     .gzip_base          = 0x11200000,
@@ -1042,6 +1180,7 @@ static const HisiSoCConfig hi3516av300_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 1, 2 },
+    HISI_V4_TIMER_CLOCKS,
 
     .num_spis           = 3,
     .spi_bases          = { 0x120C0000, 0x120C1000, 0x120C2000 },
@@ -1068,6 +1207,9 @@ static const HisiSoCConfig hi3516av300_soc = {
     .num_i2c            = 7,
     .i2c_bases          = { 0x120B0000, 0x120B1000, 0x120B2000, 0x120B3000,
                             0x120B5000, 0x120B6000, 0x120B7000 },
+    /* I2C0-3 are SPI 11-14, I2C5-7 SPI 77-79 (Hi3516CV500/AV300/DV300 data
+     * sheets' interrupt table; OpenIPC/linux hisilicon-hi3516cv500 #94). */
+    .i2c_irqs           = { 11, 12, 13, 14, 77, 78, 79 },
 
     .mipi_rx_base       = 0x113A0000,
     .mipi_rx_irq        = 57,
@@ -1084,7 +1226,7 @@ static const HisiSoCConfig hi3516av300_soc = {
     .wdt_irq            = -1,
     .wdt_freq           = 3000000,
 
-    .num_crg_defaults   = 4,
+    .num_crg_defaults   = 3,
     .crg_defaults       = {
         { 0x1B8, (1 << 0) | (1 << 1) | (1 << 2) | (1 << 18)
                | (1 << 11) | (1 << 12) | (1 << 13)
@@ -1092,7 +1234,6 @@ static const HisiSoCConfig hi3516av300_soc = {
                | (1 << 17) | (1 << 18) },
         { 0x144, 0x02 },
         { 0x16C, 0x02 },
-        { 0x78,  (1 << 2) | (1 << 4) },
     },
 
     .gzip_base          = 0x11200000,
@@ -1167,6 +1308,7 @@ static const HisiSoCConfig hi3516dv300_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 1, 2 },
+    HISI_V4_TIMER_CLOCKS,
 
     .num_spis           = 3,
     .spi_bases          = { 0x120C0000, 0x120C1000, 0x120C2000 },
@@ -1193,6 +1335,9 @@ static const HisiSoCConfig hi3516dv300_soc = {
     .num_i2c            = 7,
     .i2c_bases          = { 0x120B0000, 0x120B1000, 0x120B2000, 0x120B3000,
                             0x120B5000, 0x120B6000, 0x120B7000 },
+    /* I2C0-3 are SPI 11-14, I2C5-7 SPI 77-79 (Hi3516CV500/AV300/DV300 data
+     * sheets' interrupt table; OpenIPC/linux hisilicon-hi3516cv500 #94). */
+    .i2c_irqs           = { 11, 12, 13, 14, 77, 78, 79 },
 
     .mipi_rx_base       = 0x113A0000,
     .mipi_rx_irq        = 57,
@@ -1209,7 +1354,7 @@ static const HisiSoCConfig hi3516dv300_soc = {
     .wdt_irq            = -1,
     .wdt_freq           = 3000000,
 
-    .num_crg_defaults   = 4,
+    .num_crg_defaults   = 3,
     .crg_defaults       = {
         { 0x1B8, (1 << 0) | (1 << 1) | (1 << 2) | (1 << 18)
                | (1 << 11) | (1 << 12) | (1 << 13)
@@ -1217,7 +1362,6 @@ static const HisiSoCConfig hi3516dv300_soc = {
                | (1 << 17) | (1 << 18) },
         { 0x144, 0x02 },
         { 0x16C, 0x02 },
-        { 0x78,  (1 << 2) | (1 << 4) },
     },
 
     .gzip_base          = 0x11200000,
@@ -1288,6 +1432,7 @@ static const HisiSoCConfig hi3519v101_soc = {
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 64, 66 },
     .timer_freq         = 3000000,          /* 3 MHz */
+    .arch_timer_freq    = 24000000,         /* DTS armv7-timer clock-frequency */
 
     .num_spis           = 4,
     .spi_bases          = { 0x12120000, 0x12121000, 0x12122000, 0x12123000 },
@@ -1397,6 +1542,7 @@ static const HisiSoCConfig hi3516av200_soc = {
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 64, 66 },
     .timer_freq         = 3000000,
+    .arch_timer_freq    = 24000000,         /* same SDK DTS as Hi3519V101 */
 
     .num_spis           = 4,
     .spi_bases          = { 0x12120000, 0x12121000, 0x12122000, 0x12123000 },
@@ -1508,6 +1654,7 @@ static const HisiSoCConfig hi3516ev300_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 5, 6 },
+    HISI_V4_TIMER_CLOCKS,
 
     .num_spis           = 2,
     .spi_bases          = { 0x12070000, 0x12071000 },
@@ -1619,6 +1766,7 @@ static const HisiSoCConfig hi3516ev200_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 5, 6 },
+    HISI_V4_TIMER_CLOCKS,
 
     .num_spis           = 2,
     .spi_bases          = { 0x12070000, 0x12071000 },
@@ -1707,6 +1855,7 @@ static const HisiSoCConfig hi3518ev300_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 5, 6 },
+    HISI_V4_TIMER_CLOCKS,
 
     .num_spis           = 2,
     .spi_bases          = { 0x12070000, 0x12071000 },
@@ -1792,6 +1941,7 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 5, 6 },
+    HISI_V4_TIMER_CLOCKS,
 
     .num_spis           = 2,
     .spi_bases          = { 0x12070000, 0x12071000 },
@@ -1864,6 +2014,40 @@ static const HisiSoCConfig hi3516dv200_soc = {
  *   GK7608V200  4K@60fps  8 TOPS    H.266       (2025)
  */
 
+/*
+ * Stub register banks shared by every Goke V4 die.  Kept as a bare list so the
+ * NPU-equipped next-gen parts can append to it: `.regbanks` is an array and
+ * cannot be partially overridden after the common macro.
+ */
+#define HISI_V4_REGBANK_LIST                                \
+        { "hisi-misc",       0x12028000, 0x8000  },         \
+        { "hisi-ddr",        0x120d0000, 0x10000 },         \
+        { "hisi-iocfg-vio",  0x112c0000, 0x10000 },         \
+        { "hisi-iocfg-core", 0x120c0000, 0x10000 },         \
+        { "hisi-iocfg-ahb",  0x100c0000, 0x10000 },         \
+        { "hisi-pwm",        0x12080000, 0x10000 },         \
+        { "hisi-usb3",       0x10030000, 0x10000 },         \
+        { "hisi-aiao",       0x100e0000, 0x10000 },         \
+        { "hisi-acodec",     0x100f0000, 0x10000 },         \
+        { "hisi-vi-cap",     0x11000000, 0x200000 },        \
+        { "hisi-vi-proc",    0x11200000, 0x40000 },         \
+        { "hisi-vgs",        0x11300000, 0x10000 },         \
+        { "hisi-ive",        0x11320000, 0x10000 },         \
+        { "hisi-vpss",       0x11400000, 0x10000 }
+
+/*
+ * Goke next-gen V500 family (gk7205v500/v510/v530, gk7202v330): V4 banks plus
+ * the NPU at 0x11340000.  Must follow HISI_V4_COMMON_PERIPH.  The EV200/EV300
+ * class dies (gk7205v200/v300, gk7202v300, gk7201v200, gk7605v100) have no
+ * NPU — they do detection on IVE — so they keep the plain V4 list.
+ */
+#define HISI_V4_NPU_REGBANKS                                \
+    .num_regbanks       = 15,                               \
+    .regbanks           = {                                 \
+        HISI_V4_REGBANK_LIST,                               \
+        { "hisi-npu",        0x11340000, 0x10000 },         \
+    }
+
 /* Common V4 peripheral block — shared by all V4 & Goke configs.
  *
  * Memory layout (ram_size_default / kernel_mem_mb / extra_cmdline) is
@@ -1923,24 +2107,8 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .gzip_base          = 0x11310000,                       \
     .hwrng_base         = 0x10080000,                       \
     .hwrng_data_offset  = 0x204,                            \
-    .num_regbanks       = 15,                               \
-    .regbanks           = {                                 \
-        { "hisi-misc",       0x12028000, 0x8000  },         \
-        { "hisi-ddr",        0x120d0000, 0x10000 },         \
-        { "hisi-iocfg-vio",  0x112c0000, 0x10000 },         \
-        { "hisi-iocfg-core", 0x120c0000, 0x10000 },         \
-        { "hisi-iocfg-ahb",  0x100c0000, 0x10000 },         \
-        { "hisi-pwm",        0x12080000, 0x10000 },         \
-        { "hisi-usb3",       0x10030000, 0x10000 },         \
-        { "hisi-aiao",       0x100e0000, 0x10000 },         \
-        { "hisi-acodec",     0x100f0000, 0x10000 },         \
-        { "hisi-vi-cap",     0x11000000, 0x200000 },        \
-        { "hisi-vi-proc",    0x11200000, 0x40000 },         \
-        { "hisi-vgs",        0x11300000, 0x10000 },         \
-        { "hisi-ive",        0x11320000, 0x10000 },         \
-        { "hisi-npu",        0x11340000, 0x10000 },         \
-        { "hisi-vpss",       0x11400000, 0x10000 },         \
-    }
+    .num_regbanks       = 14,                               \
+    .regbanks           = { HISI_V4_REGBANK_LIST }
 
 /* Per-die DDR layouts shared by V4 and Goke variants.
  * V4_DDR_64M:  on-chip 512Mb DDR2 (EV200-class dies)
@@ -1966,6 +2134,42 @@ static const HisiSoCConfig gk7205v200_soc = {
     .default_sensor     = "imx307",     /* same die as EV200 */
     HISI_V4_DDR_64M,                /* EV200 die: 512Mb DDR2 */
     HISI_V4_COMMON_PERIPH,
+    HISI_V4_TIMER_CLOCKS,
+};
+
+/*
+ * GK7201V200 — the low-end binning of the Hi3516EV200-class die that
+ * GK7205V200 is built on: same 0x12xxxxxx V4 control block and the same
+ * package (QFN 9x9 mm, 88 pins), with feature tiers cut.  Per the Goke
+ * GK7205V200 datasheet v1.1 and the vendor GK7201V200 spec sheet:
+ *
+ *                     GK7205V200                 GK7201V200
+ *   CPU               Cortex-A7 @ 900 MHz        Cortex-A7 @ 600 MHz
+ *   Encoder max       2304x1296                  2304x1296 @ 15 fps
+ *                                                (or 2x1080p + 2x360p @ 15)
+ *   Sensor input      MIPI / LVDS / HiSPI        MIPI 2-lane (1.5 Gbps) + DVP
+ *   Video output      LCD, BT656/BT1120          none
+ *   Common            512 Mb embedded DDR2, FE PHY, USB 2.0, SDIO + SD,
+ *                     audio codec, IVE; no NPU on either
+ *
+ * The cuts are rated limits and unbonded interfaces, not a different memory
+ * map, so everything comes from the shared V4 macros; only name/desc/soc_id
+ * differ from gk7205v200.  In practice the 600 MHz rating is soft: the stock
+ * Xiongmai firmware on IPC_GK7201V200_G3H_S38 boards programs the A7 PLL to
+ * 900 MHz (ipctool).  Those boards carry 8 MB NOR, the 64 MB DDR2, a MIS2008
+ * sensor and kernel 4.9.37; chip id 0x72010200 was verified live via ipctool
+ * and SCSYSID0.  The vendor XMedia kernel runs it on the EV200-class platform
+ * (CONFIG_ARCH_XM72050200), while OpenIPC ships the userland MPP drivers from
+ * its goke-osdrv-gk7205v500 (xm_*) package.  No default sensor: the MIS2008
+ * has no i2c model yet.
+ */
+static const HisiSoCConfig gk7201v200_soc = {
+    .name               = "gk7201v200",
+    .desc               = "Goke GK7201V200 (Cortex-A7, ~Hi3516EV200 stripped)",
+    .soc_id             = GOKE_SOC_ID_7201V200,
+    .gpio_count         = 8,
+    HISI_V4_DDR_64M,                /* 512Mb DDR2 */
+    HISI_V4_COMMON_PERIPH,
 };
 
 static const HisiSoCConfig gk7205v300_soc = {
@@ -1976,6 +2180,7 @@ static const HisiSoCConfig gk7205v300_soc = {
     .default_sensor     = "imx335",     /* same die as EV300 */
     HISI_V4_DDR_128M,               /* EV300 die: 1Gb DDR3L */
     HISI_V4_COMMON_PERIPH,
+    HISI_V4_TIMER_CLOCKS,
 };
 
 static const HisiSoCConfig gk7202v300_soc = {
@@ -1985,6 +2190,7 @@ static const HisiSoCConfig gk7202v300_soc = {
     .gpio_count         = 8,
     HISI_V4_DDR_64M,                /* 18EV300 die: 512Mb DDR2 */
     HISI_V4_COMMON_PERIPH,
+    HISI_V4_TIMER_CLOCKS,
 };
 
 static const HisiSoCConfig gk7605v100_soc = {
@@ -1994,6 +2200,7 @@ static const HisiSoCConfig gk7605v100_soc = {
     .gpio_count         = 10,
     HISI_V4_DDR_128M,               /* DV200 die: external 128 MiB typical */
     HISI_V4_COMMON_PERIPH,
+    HISI_V4_TIMER_CLOCKS,
 };
 
 /*
@@ -2016,6 +2223,7 @@ static const HisiSoCConfig gk7205v500_soc = {
     .gpio_count         = 8,
     HISI_V4_DDR_64M,                /* 512Mb DDR2 MCP */
     HISI_V4_COMMON_PERIPH,
+    HISI_V4_NPU_REGBANKS,
     .xmsp804_timer      = true,     /* goke V500 kernel uses xmedia,sp804 */
 };
 
@@ -2026,6 +2234,7 @@ static const HisiSoCConfig gk7205v510_soc = {
     .gpio_count         = 8,
     HISI_V4_DDR_128M,               /* 1Gb DDR3 MCP */
     HISI_V4_COMMON_PERIPH,
+    HISI_V4_NPU_REGBANKS,
     .xmsp804_timer      = true,     /* goke V500 kernel uses xmedia,sp804 */
 };
 
@@ -2036,6 +2245,7 @@ static const HisiSoCConfig gk7205v530_soc = {
     .gpio_count         = 8,
     HISI_V4_DDR_128M,               /* external DDR, 128 MiB typical */
     HISI_V4_COMMON_PERIPH,
+    HISI_V4_NPU_REGBANKS,
     .xmsp804_timer      = true,     /* goke V500 kernel uses xmedia,sp804 */
 };
 
@@ -2046,7 +2256,272 @@ static const HisiSoCConfig gk7202v330_soc = {
     .gpio_count         = 8,
     HISI_V4_DDR_64M,                /* 512Mb DDR2 MCP */
     HISI_V4_COMMON_PERIPH,
+    HISI_V4_NPU_REGBANKS,
     .xmsp804_timer      = true,     /* same GK7205V500 register family / goke V500 kernel */
+};
+
+/*
+ * Goke third generation (2025-2026) — Goke's own designs on the XMedia
+ * "Lotus" SDK (ShiMetaPi shimetapi_pico_gx), split into two product lines
+ * like HiSilicon's 3516/3519:
+ *   GK7206 (codename "xmorca")  — A7 mainstream, embedded DDR, 5M/4K.
+ *   GK7606 (codename "xmfalcon")— A55 high-end, external DDR, 4K.
+ * Both keep the gk7205v5xx-style 0x12xxxxxx control block (UART 0x12040000,
+ * sysctl 0x12020000, CRG 0x12010000, xmedia,sp804 timers 0x12000000, GPIO
+ * 0x120b0000), RAM @0x40000000, an ATF BL1->BL31->BL33(u-boot-2020.01)
+ * chain, and a RISC-V MCU coprocessor.  Chip ID at REG_SC_CHIPID 0x12020EE0.
+ *
+ * ---- GK7206V1 series (codename xmorca) ----
+ * Goke's product page (gokemicro.com/znjk/info.aspx?itemid=444, 2026-02)
+ * lists five variants, all dual Cortex-A7 MP2 + RISC-V MCU, 1.0 TOPS NPU
+ * (INT16/8/4) + IVE, "圆鸮" AI ISP, AOV/fast boot, embedded DDR KGD:
+ *
+ *   variant  package  DDR                    encode  FE PHY  VI/VO extras
+ *   V10      QFN92    512Mb DDR2  (64 MiB)   5M@30   yes     -
+ *   V10B     QFN92    512Mb DDR2  (64 MiB)   5M@30   yes     DVP, RGB/BT.656
+ *   V11      QFN92    1Gb DDR3L  (128 MiB)   4K@25   none    -
+ *   V11A     QFN128   1Gb DDR3L  (128 MiB)   4K@25   yes     DVP, I80/BT.1120
+ *   V12A     QFN128   2Gb DDR3L  (256 MiB)   4K@25   yes     DVP, I80/BT.1120
+ *
+ * The ShiMetaPi SDK ships board configs only for xm7206v11a and xm7206v12a
+ * (configs/<chip>/reg/ DDR sheets: DDR3 128M and 256M).  The variants share
+ * one die map, so it lives in GK7206_XMORCA_PERIPH below and each machine
+ * adds only its name, chip ID and DDR layout.  Modelled: gk7206v10 and
+ * gk7206v12a (the SDK target run-gk7206.sh builds its kernel for).
+ *
+ * DDR layout is the vendor one: Linux gets mem=32M and the rest is MMZ at
+ * 0x42000000 under the *xmedia* allocator (not the HiSilicon "hisi" one the
+ * V4 parts use) — 32M on 64 MiB parts, 96M on 128 MiB, 224M on 256 MiB.
+ * That is what the SDK's GMP "load" script passes to xm_osal.ko, and what
+ * the *_bootargs_buildin.txt profiles (media drivers built in) put on the
+ * kernel command line.
+ *
+ * Map from the SDK u-boot arch/arm/include/asm/arch-xmorca/platform.h and
+ * the vendor xmorca.dts.  The gk7205v5xx V4-common block is exact for the
+ * control plane (UART0/sysctl/CRG/timers/GPIO bases); the I/O side differs
+ * in many places — FE MAC 0x10040000 -> 0x100d0000, UART/I2C/SPI counts and
+ * IRQs, SDHCI, FMC, VEDU, IVE — all re-specified in the macro below.  Uses
+ * the xmedia,sp804 timer like gk7205v500.  (DDRC is at 0x11330000 vs the
+ * V4-common 0x120d0000 hisi-ddr stub; left as-is for now — a RAM-backed
+ * stub either way, not touched on the -kernel boot path.)
+ *
+ * Declares 2 CPUs (dual A7 MP2): the GICv2 makes ITARGETSR RAZ for a
+ * uniprocessor GIC, so a 1-CPU model makes the kernel's gic_get_cpumask()
+ * read 0 ("GIC CPU mask not found — kernel will fail to boot") and wedges
+ * every interrupt-driven probe.  With 2 CPU interfaces ITARGETSR reports the
+ * real mask and interrupts work.  CPU1 itself never onlines — the vendor
+ * "lotus,xmorca-smp" release method isn't modeled — but the kernel times out
+ * on it gracefully and continues single-core (same as the DTS expects).
+ *
+ * Boots the vendor SDK kernel (linux-5.10.y, xmorca_defconfig) via -kernel
+ * with the appended xmorca.dtb, to busybox userspace from an initramfs or
+ * from a jffs2 root on SPI-NOR (root=/dev/mtdblock4) — see run-gk7206.sh.
+ */
+#define GK7206_XMORCA_PERIPH                                                   \
+    .max_cpus           = 2,            /* dual Cortex-A7 MP2 */               \
+    .default_cpus       = 2,            /* 2 GIC CPU interfaces (ITARGETSR !RAZ) */ \
+    .gpio_count         = 9,            /* GPIO0..GPIO8 @ 0x120b0000..0x120b8000 (DTS) */ \
+    HISI_V4_COMMON_PERIPH,                                                     \
+    /* 9 GPIO banks on GIC SPI 22..30 (DTS gpio_chip irqs 0x16..0x1e).  Must   \
+     * follow the macro, which sets the wrong V4 gpio_irq_start=16 — a 16-base \
+     * would put GPIO3..5 on 19..21 and clobber the SPIs below. */             \
+    .gpio_irq_start     = 22,                                                  \
+    .xmsp804_timer      = true,         /* XMedia kernel uses xmedia,sp804 */  \
+    .femac_base         = 0x100d0000,   /* GMAC_REG_BASE — orca relocated FE MAC */ \
+    /* DTS ethernet@100d0000 irq 0x25.  V4 common's femac_irq=33 is both wrong \
+     * for orca and collides with sdhci mmc1 (also 33) below. */               \
+    .femac_irq          = 37,                                                  \
+    /* Flash: "lotus,fmc" (fmc100) — same IP as HiFMC V100 but a shuffled      \
+     * register map, and the DT "control" reg sits at 0x10000010 (not          \
+     * 0x10000000).  Memory window stays at 0x14000000 (from V4 common). */    \
+    .fmc_ctrl_base      = 0x10000010,                                          \
+    .fmc_variant        = 1,            /* FMC_VARIANT_FMC100 */               \
+    .fmc_irq            = 36,           /* DTS: flash-memory-controller irq SPI 36 */ \
+    /* SD/MMC — three "lotus,sdhci" controllers.  The V4-common defaults       \
+     * (2 ports @0x10010000/0x10020000, IRQ 30/31) don't match orca, so        \
+     * override with the DTS map: mmc0 eMMC @0x10010000 irq32,                 \
+     * mmc1 @0x10040000 irq33, mmc2 SDIO @0x10020000 irq34.  A wrong IRQ       \
+     * leaves the eMMC probe waiting forever for command-complete (which is    \
+     * why the sdhci node used to be DTB-disabled). */                         \
+    .num_sdhci          = 3,                                                   \
+    .sdhci_bases        = { 0x10010000, 0x10040000, 0x10020000 },              \
+    .sdhci_irqs         = { 32, 33, 34 },                                      \
+    /* Pre-mark the SD/MMC DLL (delay-locked-loop) status registers as         \
+     * locked/ready in the CRG.  The lotus,sdhci driver reads these via its    \
+     * crg_regmap phandle (drivers/mmc/host/sdhci-xmorca.c) to pick a data     \
+     * sampling phase; if they never report ready it settles on a bad phase    \
+     * and card data init loops ("Skipping voltage switch").  DRV_DLL_STATUS   \
+     * = LOCK|READY (bit15|bit14), SAMPL/DS/DS180 = SLAVE_READY (bit0). */     \
+    .num_crg_defaults   = 8,                                                   \
+    .crg_defaults       = {                                                    \
+        { 0x208, 0x00000001 },  /* eMMC  SAMPL_DLL_STATUS: SLAVE_READY */      \
+        { 0x210, 0x0000C000 },  /* eMMC  DRV_DLL_STATUS:   LOCK|READY  */      \
+        { 0x214, 0x00000001 },  /* eMMC  DS_DLL_STATUS:    READY       */      \
+        { 0x218, 0x00000001 },  /* eMMC  DS180_DLL_STATUS: READY       */      \
+        { 0x224, 0x00000001 },  /* SDIO0 SAMPL_DLL_STATUS: SLAVE_READY */      \
+        { 0x228, 0x0000C000 },  /* SDIO0 DRV_DLL_STATUS:   LOCK|READY  */      \
+        { 0x238, 0x00000001 },  /* SDIO1 SAMPL_DLL_STATUS: SLAVE_READY */      \
+        { 0x23c, 0x0000C000 },  /* SDIO1 DRV_DLL_STATUS:   LOCK|READY  */      \
+    },                                                                         \
+    /*                                                                         \
+     * ---- xmorca-specific overrides (from qemu-boot/gk7206/xmorca.dts.tmp) ---- \
+     * HISI_V4_COMMON_PERIPH carries the Hi3516EV/DV V4-die counts, bases and  \
+     * IRQs; several don't match the GK7206 xmorca die.  Everything below is   \
+     * re-specified from the vendor DTS so kernel probes land on real MMIO and \
+     * wire the right GIC lines instead of the inherited V4 numbers.           \
+     */                                                                        \
+                                                                               \
+    /* 4 PL011 UARTs @ 0x1204{0..3}000, GIC SPI 11..14 (V4 common had 3 @7..9). */ \
+    .num_uarts          = 4,                                                   \
+    .uart_bases         = { 0x12040000, 0x12041000, 0x12042000, 0x12043000 },  \
+    .uart_irqs          = { 11, 12, 13, 14 },                                  \
+                                                                               \
+    /* 4 I2C @ 0x1206{0..3}000 (V4 common had 3; I2C wires no IRQ here). */    \
+    .num_i2c            = 4,                                                   \
+    .i2c_bases          = { 0x12060000, 0x12061000, 0x12062000, 0x12063000 },  \
+                                                                               \
+    /* 3 PL022 SPI @ 0x1207{0..2}000, GIC SPI 19..21 (V4 common had 2 @14..15). */ \
+    .num_spis           = 3,                                                   \
+    .spi_bases          = { 0x12070000, 0x12071000, 0x12072000 },              \
+    .spi_irqs           = { 19, 20, 21 },                                      \
+                                                                               \
+    /*                                                                         \
+     * VEDU relocated on orca: DTS vedu@0x11800000 with a 2nd reg window at    \
+     * 0x11420000 (V4 common put the primary block at 0x11410000).  jpge_base  \
+     * stays 0x11420000 — that is exactly VEDU's 2nd window on this die, mapped \
+     * as the hisi-vedu device's MMIO region 1.  DTS shares GIC SPI 45 between \
+     * VEDU and MIPI RX; QEMU's GIC has one level per input, so we keep the    \
+     * inherited vedu_irq (47, otherwise unused in this model) rather than     \
+     * clobber MIPI's pic[45].  The encoder IRQ isn't exercised on -kernel boot. \
+     */                                                                        \
+    .vedu_base          = 0x11800000,                                          \
+                                                                               \
+    /*                                                                         \
+     * Full regbank re-list for xmorca (V4 common's array can't be             \
+     * partially overridden).  Deltas vs HISI_V4_COMMON_PERIPH:                \
+     *   - hisi-ive relocated 0x11320000 -> 0x11490000 (DTS ive@11490000).     \
+     *     "hisi-ive" instantiates the real functional IVE device, so this     \
+     *     moves it to orca's address, not just a stub.                        \
+     *   - added hisi-lsadc, hisi-cipher, hisi-vo, hisi-gdc, hisi-iocfg-vo     \
+     *     (adc@120a0000, cipher@10050000, vo/gfbg@11280000, gdc@11480000,     \
+     *     iocfg-controller3@11980000) — present in the DTS, previously        \
+     *     unmapped so the kernel drivers faulted on probe.                    \
+     * Note: 2nd watchdog@12030020 (DTS) sits inside wdt@12030000's window and \
+     * is left unmodelled.  hisi-jpge stays folded into hisi-vedu (see above). \
+     */                                                                        \
+    .num_regbanks       = 20,                                                  \
+    .regbanks           = {                                                    \
+        { "hisi-misc",       0x12028000, 0x8000  },                            \
+        { "hisi-ddr",        0x120d0000, 0x10000 },                            \
+        { "hisi-iocfg-vio",  0x112c0000, 0x10000 },                            \
+        { "hisi-iocfg-core", 0x120c0000, 0x10000 },                            \
+        { "hisi-iocfg-ahb",  0x100c0000, 0x10000 },                            \
+        { "hisi-pwm",        0x12080000, 0x10000 },                            \
+        { "hisi-usb3",       0x10030000, 0x10000 },                            \
+        { "hisi-aiao",       0x100e0000, 0x10000 },                            \
+        { "hisi-acodec",     0x100f0000, 0x10000 },                            \
+        { "hisi-vi-cap",     0x11000000, 0x200000 },                           \
+        { "hisi-vi-proc",    0x11200000, 0x40000 },                            \
+        { "hisi-vgs",        0x11300000, 0x10000 },                            \
+        { "hisi-ive",        0x11490000, 0x10000 },  /* orca: was 0x11320000 */ \
+        { "hisi-npu",        0x11340000, 0x10000 },                            \
+        { "hisi-vpss",       0x11400000, 0x10000 },                            \
+        { "hisi-lsadc",      0x120a0000, 0x1000  },  /* adc@120a0000 lotus,lsadc */ \
+        { "hisi-cipher",     0x10050000, 0x10000 },  /* cipher@10050000 AES/SHA/RSA */ \
+        { "hisi-vo",         0x11280000, 0x40000 },  /* vo/gfbg@11280000 display */ \
+        { "hisi-gdc",        0x11480000, 0x10000 },  /* gdc@11480000 lens distort */ \
+        { "hisi-iocfg-vo",   0x11980000, 0x10000 },  /* iocfg-controller3@11980000 */ \
+    }
+
+static const HisiSoCConfig gk7206v10_soc = {
+    .name               = "gk7206v10",
+    .desc               = "Goke GK7206V10 (Cortex-A7 MP2 + RISC-V MCU, 1.0 TOPS NPU)",
+    .soc_id             = GOKE_SOC_ID_7206V10,
+    GK7206_XMORCA_PERIPH,
+    .ram_size_default   = 64 * MiB,     /* embedded 512Mb DDR2 */
+    .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=xmedia "
+                          "mmz=anonymous,0,0x42000000,32M",
+};
+
+/* GK7206V12A — the QFN128 top bin with 2Gb DDR3L (256 MiB). */
+static const HisiSoCConfig gk7206v12a_soc = {
+    .name               = "gk7206v12a",
+    .desc               = "Goke GK7206V12A (Cortex-A7 MP2 + RISC-V MCU, 1.0 TOPS NPU, 4K)",
+    .soc_id             = GOKE_SOC_ID_7206V12A,
+    GK7206_XMORCA_PERIPH,
+    .ram_size_default   = 256 * MiB,    /* embedded 2Gb DDR3L */
+    .kernel_mem_mb      = 32,
+    .extra_cmdline      = "mmz_allocator=xmedia "
+                          "mmz=anonymous,0,0x42000000,224M",
+};
+
+/*
+ * ---- GK7606V1 series (codename xmfalcon) — PLACEHOLDER ----
+ * Goke's A55 high-end 4K line, sibling of GK7206.  Cortex-A55 (aarch64),
+ * external DDR3/DDR4/LPDDR4, adds USB3.  The SDK ships NO xmfalcon board
+ * config (only xmorca/GK7206), so the map below — from the SDK u-boot
+ * arch/arm/include/asm/arch-xmfalcon/platform.h — is UNVERIFIED against
+ * silicon or a boot.  Registered so the machine name exists and future work
+ * has a scaffold; NOT expected to boot yet.  UNKNOWNS flagged inline:
+ *   - GIC physical bases (u-boot uses virtual 0xf6801000/0xf6802000);
+ *   - all IRQ numbers (borrowed from hi3519dv500, likely wrong);
+ *   - SoC ID and external DDR size.
+ * Deltas from GK7206/xmorca: A55 aarch64 + GICv3 + ATF/PSCI SMP; FE/GMAC
+ * 0x100d0000 -> gigabit GMAC 0x11900000; adds USB3 @0x10040000; ext DDR.
+ * Shared 0x12xx control block (UART/sysctl/CRG/sp804/GPIO) is authoritative.
+ */
+static const HisiSoCConfig gk7606v1_soc = {
+    .name               = "gk7606v1",
+    .desc               = "Goke GK7606V1 (Cortex-A55, 4K — PLACEHOLDER, does not boot yet)",
+    .cpu_type           = ARM_CPU_TYPE_NAME("cortex-a55"),
+    .soc_id             = GOKE_SOC_ID_7606V1,
+    .aarch64            = true,
+    .uboot_load_addr    = 0x40700000,   /* CONFIG_SYS_TEXT_BASE_ORI (xmfalcon.h) */
+    .psci_conduit       = 1,
+
+    .ram_size_default   = 256 * MiB,    /* external DDR; size UNVERIFIED */
+    .ram_base           = 0x40000000,
+    .sram_base          = 0x04020000,
+    .sram_size          = 128 * KiB,
+
+    .use_gic            = true,
+    .gic_version        = 3,
+    .gic_dist_base      = 0x12400000,   /* PLACEHOLDER — u-boot virt 0xf6801000 */
+    .gic_redist_base    = 0x12440000,   /* PLACEHOLDER — u-boot virt 0xf6802000 */
+    .gic_num_spi        = 128,
+
+    .sysctl_base        = 0x12020000,   /* SYS_CTRL_REG_BASE (authoritative) */
+    .crg_base           = 0x12010000,   /* CRG_REG_BASE (authoritative) */
+
+    .num_uarts          = 3,
+    .uart_bases         = { 0x12040000, 0x12041000, 0x12042000 }, /* authoritative */
+    .uart_irqs          = { 5, 6, 7 },  /* PLACEHOLDER irqs */
+
+    .xmsp804_timer      = true,         /* xmedia,sp804 @ 0x12000000 */
+    .num_timers         = 1,
+    .timer_bases        = { 0x12000000 },
+    .timer_irqs         = { 4 },
+    .timer_freq         = 3000000,
+
+    .num_spis           = 2,
+    .spi_bases          = { 0x12070000, 0x12071000 },
+    .spi_irqs           = { 19, 20 },   /* PLACEHOLDER irqs */
+
+    .fmc_ctrl_base      = 0x10000000,   /* FMC_REG_BASE (authoritative) */
+    .fmc_mem_base       = 0x14000000,   /* FMC_MEM_BASE (authoritative) */
+
+    .gpio_base          = 0x120b0000,   /* GPIO0_REG_BASE (authoritative) */
+    .gpio_count         = 10,
+    .gpio_stride        = 0x1000,
+    .gpio_irq_start     = 23,           /* PLACEHOLDER */
+
+    /* Gigabit GMAC (GMAC_REG_BASE 0x11900000).  Model like hi3519dv500's
+     * gmac-v5 (16-byte descriptors); IRQ is a PLACEHOLDER. */
+    .gmac_base          = 0x11900000,
+    .gmac_irq           = 54,           /* PLACEHOLDER */
+    .gmac_desc_size     = 16,
+    .gmac_rx_offset     = 2,
 };
 
 /*
@@ -2425,8 +2900,31 @@ static const HisiSoCConfig hi3519dv500_soc = {
     .gpio_irq_start     = 23,
     .gpio0_input_high   = (1u << 0),    /* GPIO0_0 update-button pull-up (high) */
 
-    .num_regbanks       = 7,
+    /* SD: vendor dtsi mmc1 "SDIO" @0x10030000 (GIC_SPI 51) is the card slot,
+     * mmc2 "SDIO1" @0x10040000 (52); listed in that order so -drive if=sd
+     * index 0 is the slot.  The eMMC controller @0x10020000 (50) is left
+     * out: NOR boards have none, and the U-Boot registers it only on eMMC
+     * builds. */
+    .num_sdhci          = 2,
+    .sdhci_bases        = { 0x10030000, 0x10040000 },
+    .sdhci_irqs         = { 51, 52 },
+
+    /* USB 3 DRD (vendor hi3519dv500_family_usb.dtsi): DWC3 @0x10320000,
+     * GIC_SPI 60, run as an xHCI host.  Its global registers (GCTL,
+     * GUSB3PIPECTL, G[TR]XTHRCFG at +0xc1xx/+0xc2xx) lie past QEMU's xHCI
+     * window and get a regbank below, with the USB2 PHY, the USB3 misc
+     * block and the OTP trim words the vendor PHY bring-up touches. */
+    .xhci_base          = 0x10320000,
+    .xhci_irq           = 60,
+    .xhci_slots         = 4,
+    .xhci_intrs         = 1,
+
+    .num_regbanks       = 11,
     .regbanks           = {
+        { "hisi-usb-dwc3",   0x1032C000, 0x4000  },   /* DWC3 globals */
+        { "hisi-usb2phy",    0x17350000, 0x1000  },
+        { "hisi-usb3misc",   0x17A40000, 0x5000  },
+        { "hisi-otp",        0x101E0000, 0x1000  },   /* USB trim / vendor id */
         { "hisi-misc",       0x11024000, 0x5000  },
         { "hisi-ddr",        0x11140000, 0x20000 },
         /* Pinmux (IOCFG) controllers — vendor sys_config: iocfg=0x10260000,
@@ -2501,8 +2999,31 @@ static const HisiSoCConfig hi3516dv500_soc = {
     .gpio_irq_start     = 23,
     .gpio0_input_high   = (1u << 0),    /* GPIO0_0 update-button pull-up (high) */
 
-    .num_regbanks       = 7,
+    /* SD: vendor dtsi mmc1 "SDIO" @0x10030000 (GIC_SPI 51) is the card slot,
+     * mmc2 "SDIO1" @0x10040000 (52); listed in that order so -drive if=sd
+     * index 0 is the slot.  The eMMC controller @0x10020000 (50) is left
+     * out: NOR boards have none, and the U-Boot registers it only on eMMC
+     * builds. */
+    .num_sdhci          = 2,
+    .sdhci_bases        = { 0x10030000, 0x10040000 },
+    .sdhci_irqs         = { 51, 52 },
+
+    /* USB 3 DRD (vendor hi3519dv500_family_usb.dtsi): DWC3 @0x10320000,
+     * GIC_SPI 60, run as an xHCI host.  Its global registers (GCTL,
+     * GUSB3PIPECTL, G[TR]XTHRCFG at +0xc1xx/+0xc2xx) lie past QEMU's xHCI
+     * window and get a regbank below, with the USB2 PHY, the USB3 misc
+     * block and the OTP trim words the vendor PHY bring-up touches. */
+    .xhci_base          = 0x10320000,
+    .xhci_irq           = 60,
+    .xhci_slots         = 4,
+    .xhci_intrs         = 1,
+
+    .num_regbanks       = 11,
     .regbanks           = {
+        { "hisi-usb-dwc3",   0x1032C000, 0x4000  },   /* DWC3 globals */
+        { "hisi-usb2phy",    0x17350000, 0x1000  },
+        { "hisi-usb3misc",   0x17A40000, 0x5000  },
+        { "hisi-otp",        0x101E0000, 0x1000  },   /* USB trim / vendor id */
         { "hisi-misc",       0x11024000, 0x5000  },
         { "hisi-ddr",        0x11140000, 0x20000 },
         /* Pinmux (IOCFG) controllers — vendor sys_config: iocfg=0x10260000,
@@ -3815,6 +4336,47 @@ static char *hisilicon_patch_appended_dtb(const char *kernel_filename,
         }
     }
 
+    /*
+     * Widen an under-sized GICv2 CPU-interface reg window.
+     *
+     * Some vendor DTBs declare the GIC CPU interface as only 0x100 bytes
+     * (e.g. Goke xmorca / GK7206: reg = <0x10301000 0x1000 0x10302000
+     * 0x100>).  The Linux GICv2 driver requires the CPU-interface region to
+     * be >= SZ_8K (0x2000) or it refuses to probe ("GIC: GICv2 detected, but
+     * range too small ... will fail to boot", drivers/irqchip/irq-gic.c),
+     * which then wedges every interrupt-driven device (SDHCI, etc.).  Real
+     * GIC-400 silicon has a 0x2000 CPU interface; the DTS just undersized it
+     * (the physical board's U-Boot env compensates with
+     * irqchip.gicv2_force_probe=1).  Rather than require an extra bootarg,
+     * bump the size to 0x2000 here so the stock driver probes normally.
+     * QEMU only maps 0x100 of CPU-interface MMIO, but the machine sets
+     * ignore_memory_transaction_failures, so reads of the unmapped tail
+     * return 0 harmlessly — exactly like the known-good Hi3516CV610 DTB,
+     * which already declares 0x2000.  Only fires when the window is smaller
+     * than 0x2000, so correctly-sized DTBs are left untouched.
+     */
+    {
+        static const char * const gicv2_compat[] = {
+            "arm,gic-400", "arm,cortex-a7-gic", "arm,cortex-a15-gic",
+            "arm,cortex-a9-gic", "arm,gic-v2", NULL
+        };
+        for (int i = 0; gicv2_compat[i]; i++) {
+            int gic = fdt_node_offset_by_compatible(dtb, -1, gicv2_compat[i]);
+            if (gic < 0) {
+                continue;
+            }
+            int len = 0;
+            const uint32_t *reg = fdt_getprop(dtb, gic, "reg", &len);
+            /* 1/1 address/size cells: <dist_base dist_sz cpu_base cpu_sz> */
+            if (reg && len >= 4 * (int)sizeof(uint32_t) &&
+                be32_to_cpu(reg[3]) < 0x2000) {
+                g_autofree uint32_t *newreg = g_memdup2(reg, len);
+                newreg[3] = cpu_to_be32(0x2000);
+                fdt_setprop_inplace(dtb, gic, "reg", newreg, len);
+            }
+        }
+    }
+
     /* Pack then re-expand with padding for kernel's atags_to_fdt() */
     fdt_pack(dtb);
     uint32_t packed = fdt_totalsize(dtb);
@@ -3903,6 +4465,58 @@ static char *hisilicon_patch_appended_dtb(const char *kernel_filename,
 
 static struct arm_boot_info hisilicon_binfo;
 
+/*
+ * No machine here uses boot.c's vexpress-style secondary pen.  Left at
+ * NULL, arm_load_kernel() would install it at smp_loader_start (0x0, as
+ * we never set it), clobbering the NULL trap page and the low page the
+ * vendor kernel writes its own trampoline into, and park the secondaries
+ * on it.  Secondaries instead stay start-powered-off until the SoC's
+ * release mechanism (CRG soft-reset bit, PSCI) turns them on.
+ */
+static void hisilicon_write_secondary_boot(ARMCPU *cpu,
+                                           const struct arm_boot_info *info)
+{
+}
+
+static void hisilicon_reset_secondary(ARMCPU *cpu,
+                                      const struct arm_boot_info *info)
+{
+}
+
+/*
+ * CV500/AV300/DV300 CPU1 release, driven by the CRG "cpu1-reset" line
+ * (REG_CPU_SRST_CRG bit 2).  Before clearing the bit the kernel has
+ * written "ldr pc, [pc, #-4]; .word secondary_startup" at physical 0,
+ * so CPU1 just has to leave reset at PC 0.
+ *
+ * After a firmware boot that is literally a reset: CPU0 runs U-Boot and
+ * the kernel in Secure SVC, and so does a freshly reset CPU1.  With
+ * -kernel, boot.c enters CPU0 in NS Hyp (or NS SVC without EL2), so
+ * start CPU1 at 0 in that same state; a Secure SVC CPU1 next to a Hyp
+ * CPU0 makes the kernel report "CPUs started in inconsistent modes" and
+ * drop the Hyp stub.
+ */
+typedef struct HisiCpuRelease {
+    ARMCPU *cpu;
+    bool kernel_boot;
+} HisiCpuRelease;
+
+static void hisilicon_cpu1_reset(void *opaque, int n, int level)
+{
+    HisiCpuRelease *r = opaque;
+    uint64_t mpidr = arm_cpu_mp_affinity(r->cpu);
+
+    if (level) {
+        arm_set_cpu_off(mpidr);
+    } else if (r->kernel_boot) {
+        int el = arm_feature(&r->cpu->env, ARM_FEATURE_EL2) ? 2 : 1;
+
+        arm_set_cpu_on(mpidr, 0, 0, el, false);
+    } else {
+        arm_set_cpu_on_and_reset(mpidr);
+    }
+}
+
 /* ARM instruction encoding helpers for boot ROM generation */
 static inline uint32_t arm_movw(int rd, uint16_t imm16)
 {
@@ -3940,8 +4554,41 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
         return;
     }
 
+    /*
+     * V1: hand off to the flash window and let U-Boot run in place.  On
+     * silicon the SPI NOR is remapped at 0 and the reset code jumps into
+     * the window through _clr_remap_spi_entry; starting at the window
+     * skips only that jump.  From there start.S walks its reg_info table,
+     * which is what brings the PLLs and DDR up (see hisi-ddrc-v1), and
+     * only then copies itself to DDR.  Address 0 stays RAM: relocate
+     * copies U-Boot's exception table there.
+     */
+    if (c->v1_xip_boot) {
+        uint32_t v1rom[] = {
+            cpu_to_le32(0xea000006),    /* b reset_handler (word 8)    */
+            cpu_to_le32(0xe1b0f00e),    /* movs pc, lr  (undef: skip)  */
+            cpu_to_le32(0xeafffffe),    /* b .  (SWI)                  */
+            cpu_to_le32(0xeafffffe),    /* b .  (prefetch abort)       */
+            cpu_to_le32(0xe25ef004),    /* subs pc, lr, #4 (dabort)    */
+            cpu_to_le32(0xeafffffe),    /* b .  (reserved)             */
+            cpu_to_le32(0xeafffffe),    /* b .  (IRQ)                  */
+            cpu_to_le32(0xeafffffe),    /* b .  (FIQ)                  */
+            cpu_to_le32(0xe321f0d3),    /* msr cpsr_c, #0xD3           */
+            cpu_to_le32(0xe51ff004),    /* ldr pc, [pc, #-4]           */
+            cpu_to_le32(c->fmc_mem_base),
+        };
+        MemoryRegion *v1bootrom = g_new(MemoryRegion, 1);
+
+        memory_region_init_ram(v1bootrom, NULL, "hisilicon.bootrom",
+                               0x1000, &error_fatal);
+        memory_region_add_subregion(sysmem, 0, v1bootrom);
+        rom_add_blob_fixed("hisilicon.bootrom", v1rom, sizeof(v1rom), 0);
+        return;
+    }
+
     hwaddr flash_src = c->fmc_mem_base;         /* e.g. 0x14000000 */
     hwaddr ram_dst   = c->ram_base;             /* e.g. 0x40000000 */
+    hwaddr uboot_entry = 0;   /* jump target; defaults to ram_dst (set below) */
     /*
      * Boot partition copy size.  Vendor U-Boot binaries vary widely:
      * Hi3516CV100 ≈ 130 KB, Hi3516EV200 ≈ 230 KB, Goke V4 ≈ 515 KB.
@@ -4003,6 +4650,82 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
             const uint32_t *w = (const uint32_t *)data;
             size_t nwords = len / 4;
             /*
+             * XM/Xiongmai V4 "reg-config" boot header (e.g. gk7201v200):
+             * flash offset 0 is three `b .` reset stubs (0xeafffffe) + an
+             * 8-word 0xdeadbeef magic run + a CRG (0x1201xxxx) register-init
+             * table — not a reset branch and not a load descriptor.  The real
+             * u-boot load descriptor sits *after* the table as a short
+             * `…<entry> … 0xdeadbeef 0xdeadbeef <load_base> …` block, with the
+             * DRAM entry word two slots ahead of the marker run and the u-boot
+             * image (a 0x40-byte header then code) following it.  The generic
+             * scan below misses this: the leading 8-word run is followed by a
+             * CRG register (not a DRAM addr), and this descriptor's own run is
+             * only 2 words.  Detect the signature and resolve it explicitly.
+             */
+            bool xm_handled = false;
+            if (nwords > 16 &&
+                le32_to_cpu(w[0]) == 0xeafffffe &&
+                le32_to_cpu(w[3]) == 0xdeadbeef &&
+                (le32_to_cpu(w[11]) & 0xffff0000) == 0x12010000) {
+                size_t xscan = MIN(nwords, (size_t)(0x8000 / 4));
+                for (size_t r = 12; r + 3 < xscan; r++) {
+                    if (le32_to_cpu(w[r]) != 0xdeadbeef) {
+                        continue;
+                    }
+                    size_t run = 0;
+                    while (r + run < xscan &&
+                           le32_to_cpu(w[r + run]) == 0xdeadbeef) {
+                        run++;
+                    }
+                    /*
+                     * The load descriptor is the z-stage start.S literal pool:
+                     * a `.balignl 16,0xdeadbeef` gap followed by _TEXT_BASE,
+                     * _clr_remap_fmc_entry (a pointer into the FMC NOR window)
+                     * and _start_armboot.  Require that exact shape so we don't
+                     * latch onto an incidental 0xdeadbeef word in the reg table.
+                     */
+                    if (r + run + 3 >= xscan) {
+                        break;      /* descriptor + code would run off the image */
+                    }
+                    uint32_t text_base = le32_to_cpu(w[r + run]);
+                    uint32_t fmc_entry = le32_to_cpu(w[r + run + 1]);
+                    uint32_t armboot   = le32_to_cpu(w[r + run + 2]);
+                    hwaddr reset_off   = (hwaddr)(r + run + 3) * 4;
+                    /* The whole copy (and so the entry inside it) must land in
+                     * the RAM this machine actually maps. */
+                    const hwaddr xm_copy_sz = 0x40000;   /* boot partition */
+                    if ((text_base & 0xffff) == 0 &&
+                        text_base >= c->ram_base &&
+                        machine->ram_size >= xm_copy_sz &&
+                        text_base - c->ram_base <=
+                            machine->ram_size - xm_copy_sz &&
+                        reset_off < xm_copy_sz &&
+                        fmc_entry >= c->fmc_mem_base &&
+                        (fmc_entry - c->fmc_mem_base) < 0x1000000 &&
+                        armboot >= c->ram_base &&
+                        armboot - c->ram_base < machine->ram_size) {
+                        /*
+                         * QEMU's FMC NOR window is MMIO (not executable), so the
+                         * z-stage cannot run execute-in-place from flash as it
+                         * does under the mask ROM.  Copy the boot partition from
+                         * flash 0 to _TEXT_BASE (the u-boot.lds link base,
+                         * TEXT_BASE_ORI) and enter the `reset` handler, which
+                         * follows the 3-word descriptor pool (_TEXT_BASE,
+                         * _clr_remap_fmc_entry, _start_armboot); the factory
+                         * `_start` word at flash 0 is a dead `b .`.  fmc_entry is
+                         * only used as part of the signature.
+                         */
+                        flash_src   = c->fmc_mem_base;        /* flash 0       */
+                        ram_dst     = text_base;              /* TEXT_BASE_ORI */
+                        uboot_entry = text_base + reset_off;  /* reset handler */
+                        copy_sz     = xm_copy_sz;
+                        xm_handled  = true;
+                        break;
+                    }
+                    r += run;
+                }
+            }
+            /*
              * The loader self-descriptor is a run of >= 4 0xdeadbeef marker
              * words immediately followed by the loader's absolute load
              * address.  The loader block (its ARM reset-vector word) begins
@@ -4021,7 +4744,7 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
              */
             const size_t MIN_RUN = 4;
             size_t scan = MIN(nwords, (size_t)(0x40000 / 4));  /* first 256 KiB */
-            for (size_t i = 0; i + MIN_RUN <= scan; i++) {
+            for (size_t i = 0; !xm_handled && i + MIN_RUN <= scan; i++) {
                 if (le32_to_cpu(w[i]) != 0xdeadbeef) {
                     continue;
                 }
@@ -4064,6 +4787,13 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
         }
     }
 
+    /* Jump target defaults to the copy destination unless a descriptor set a
+     * distinct entry (e.g. the XM reg-config header, whose image carries a
+     * 0x40-byte header ahead of its entry). */
+    if (!uboot_entry) {
+        uboot_entry = ram_dst;
+    }
+
     /*
      * Build a small boot ROM that copies U-Boot from the SPI NOR flash
      * memory window to DDR and jumps to it.
@@ -4096,9 +4826,9 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
         rom[n++] = cpu_to_le32(0xe1510003);     /* cmp r1, r3             */
         rom[n++] = cpu_to_le32(0x1afffffb);     /* bne copy_loop          */
 
-        /* Jump to DDR */
-        rom[n++] = cpu_to_le32(arm_movw(1, ram_dst & 0xffff));
-        rom[n++] = cpu_to_le32(arm_movt(1, ram_dst >> 16));
+        /* Jump to U-Boot entry (== ram_dst unless a descriptor set one) */
+        rom[n++] = cpu_to_le32(arm_movw(1, uboot_entry & 0xffff));
+        rom[n++] = cpu_to_le32(arm_movt(1, uboot_entry >> 16));
         rom[n++] = cpu_to_le32(0xe12fff11);     /* bx r1                  */
     } else {
         /*
@@ -4170,10 +4900,12 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
     }
 
     MemoryRegion *bootrom = g_new(MemoryRegion, 1);
-    if (armv7) {
+    if (armv7 && !c->cpu_srst_offset) {
         /* Cortex-A7+ uses VBAR for exception vectors, so address 0 can be
          * ROM.  Firmware with NULL pointer bugs that write to address 0
-         * will have writes silently dropped — same as real silicon. */
+         * will have writes silently dropped — same as real silicon.
+         * SoCs that release CPU1 through the CRG (cpu_srst_offset) need
+         * it writable: the kernel puts CPU1's reset trampoline there. */
         memory_region_init_rom(bootrom, NULL, "hisilicon.bootrom",
                                0x1000, &error_fatal);
     } else {
@@ -4186,8 +4918,10 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
                                0x1000, &error_fatal);
     }
     memory_region_add_subregion(sysmem, 0, bootrom);
-    address_space_write_rom(&address_space_memory, 0,
-                            MEMTXATTRS_UNSPECIFIED, rom, sizeof(rom));
+    /* A ROM blob, so every system reset reinstalls the boot ROM.  On
+     * ARM926 it is RAM and U-Boot has overwritten it with its vectors;
+     * the reboot must start from the boot ROM again, not from those. */
+    rom_add_blob_fixed("hisilicon.bootrom", rom, sizeof(rom), 0);
 }
 
 /*
@@ -4214,18 +4948,45 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
 typedef struct {
     ARMCPU  *cpu;
     uint64_t entry;
+    MemoryRegion *alias0;       /* reset-time mask-ROM alias at 0, or NULL */
 } HisiMaskromReset;
 
+/*
+ * Restart CPU0 at @entry on every system reset.  Shared by the -bios
+ * mask-ROM path (which also re-enables its alias at 0) and the flash-boot
+ * paths, which have no mask-ROM alias.
+ */
 static void hisilicon_maskrom_cpu_reset(void *opaque)
 {
     HisiMaskromReset *info = opaque;
     CPUState *cs = CPU(info->cpu);
 
+    if (info->alias0) {
+        memory_region_set_enabled(info->alias0, true);
+    }
     cpu_reset(cs);
     cpu_set_pc(cs, info->entry);
 }
 
-static void hisilicon_load_maskrom(MemoryRegion *sysmem,
+/*
+ * SC_CTRL bit 8 ("clear boot remap"), driven by hisi-sysctl.  The
+ * mask-ROM sets it in its last step before jumping to the loaded image;
+ * from then on address 0 is memory again.  The SoCs that release CPU1
+ * through the CRG depend on that: the kernel writes CPU1's reset
+ * trampoline at physical 0.  One-way until the next system reset, so a
+ * later SC_CTRL write that happens to leave bit 8 clear cannot bring the
+ * ROM back over the trampoline.
+ */
+static void hisilicon_maskrom_remap(void *opaque, int n, int level)
+{
+    HisiMaskromReset *info = opaque;
+
+    if (level) {
+        memory_region_set_enabled(info->alias0, false);
+    }
+}
+
+static HisiMaskromReset *hisilicon_load_maskrom(MemoryRegion *sysmem,
                                     const HisiSoCConfig *c,
                                     MachineState *machine,
                                     ARMCPU *cpu0)
@@ -4234,6 +4995,7 @@ static void hisilicon_load_maskrom(MemoryRegion *sysmem,
     uint64_t entry, low, high;
     ssize_t loaded;
     HisiMaskromReset *info;
+    MemoryRegion *alias;
 
     if (c->sram_base != 0x04010000) {
         error_report("hisilicon: -bios mask-ROM path is only wired up for "
@@ -4261,12 +5023,10 @@ static void hisilicon_load_maskrom(MemoryRegion *sysmem,
      * compatibility, then this alias takes precedence in the
      * memory region priority).
      */
-    {
-        MemoryRegion *alias = g_new(MemoryRegion, 1);
-        memory_region_init_alias(alias, NULL, "hisilicon.maskrom-alias-0",
-                                 rom, 0, HISI_MASKROM_SIZE);
-        memory_region_add_subregion_overlap(sysmem, 0, alias, 1);
-    }
+    alias = g_new(MemoryRegion, 1);
+    memory_region_init_alias(alias, NULL, "hisilicon.maskrom-alias-0",
+                             rom, 0, HISI_MASKROM_SIZE);
+    memory_region_add_subregion_overlap(sysmem, 0, alias, 1);
 
     loaded = load_elf(machine->firmware, NULL, NULL, NULL,
                       &entry, &low, &high, NULL,
@@ -4291,7 +5051,9 @@ static void hisilicon_load_maskrom(MemoryRegion *sysmem,
     info = g_new0(HisiMaskromReset, 1);
     info->cpu = cpu0;
     info->entry = entry;
+    info->alias0 = alias;
     qemu_register_reset(hisilicon_maskrom_cpu_reset, info);
+    return info;
 }
 
 /*
@@ -4385,9 +5147,11 @@ static void hisilicon_common_init(MachineState *machine,
     qemu_irq pic[256];
     int num_pic = 0;
     int n;
+    SysBusDevice *fmc_irq_dev = NULL; /* FMC, IRQ-connected after pic[] is built */
     bool flash_boot = false;  /* true when booting from SPI NOR flash dump */
     bool fmc_nand_boot = false; /* true when the FMC boot flash is SPI NAND */
     bool bios_boot = machine->firmware && machine->firmware[0];
+    HisiMaskromReset *maskrom = NULL;
                                 /* true when -bios loads a mask-ROM ELF */
 
     /* SRAM (skipped on STB family which has no on-chip SRAM in DT) */
@@ -4403,6 +5167,12 @@ static void hisilicon_common_init(MachineState *machine,
         const char *fmc_type = c->fmc_type ? c->fmc_type : "hisi-fmc";
         DeviceState *fmc = qdev_new(fmc_type);
         SysBusDevice *fmcbus = SYS_BUS_DEVICE(fmc);
+
+        /* Select the register-map variant (0 = HiFMC V100, 1 = fmc100 for
+         * Goke xmorca / GK7206).  Only the hisi-fmc model has this property. */
+        if (c->fmc_variant && (!c->fmc_type || !strcmp(fmc_type, "hisi-fmc"))) {
+            qdev_prop_set_uint32(fmc, "variant", c->fmc_variant);
+        }
 
         /*
          * Forward the machine-level "flash-file" property to whichever
@@ -4444,6 +5214,10 @@ static void hisilicon_common_init(MachineState *machine,
         sysbus_realize_and_unref(fmcbus, &error_fatal);
         sysbus_mmio_map(fmcbus, 0, c->fmc_ctrl_base);
         sysbus_mmio_map(fmcbus, 1, c->fmc_mem_base);
+        /* The fmc100 (lotus,fmc) driver waits on an interrupt for DMA-read
+         * completion.  The IRQ can only be connected once the GIC has built
+         * pic[] (below), so stash the device and wire it up after that. */
+        fmc_irq_dev = fmcbus;
 
         /*
          * Dual NOR+NAND boards (e.g. OpenIPC hi3516ev300 NAND: u-boot+env in
@@ -4483,17 +5257,81 @@ static void hisilicon_common_init(MachineState *machine,
          * for V1–V5 IPC kernels.  Skip when RAM lives at 0 (e.g. STB family
          * Hi3798CV200) — the trap would conflict with the system memory. */
         MemoryRegion *trap = g_new(MemoryRegion, 1);
-        memory_region_init_rom(trap, NULL, "hisilicon.trapnull",
-                               0x1000, &error_fatal);
+        if (c->cpu_srst_offset || !c->use_gic) {
+            /* RAM, not ROM: the kernel's SMP bringup writes CPU1's reset
+             * trampoline here (see hisilicon_cpu1_reset), and the V1
+             * 3.0.8 kernel's arch_reset() copies its tcm_slow_reset stub
+             * to physical 0x100 and jumps to it (mach-hi3518/tcm_reset.S);
+             * with ROM the copy is dropped and the restart prefetch-aborts
+             * forever instead of reaching SC_SYSRES. */
+            memory_region_init_ram(trap, NULL, "hisilicon.trapnull",
+                                   0x1000, &error_fatal);
+        } else {
+            memory_region_init_rom(trap, NULL, "hisilicon.trapnull",
+                                   0x1000, &error_fatal);
+        }
         memory_region_add_subregion(sysmem, 0, trap);
         uint32_t insn[2] = { cpu_to_le32(0xe3a00000),   /* mov r0, #0 */
                              cpu_to_le32(0xe12fff1e) };  /* bx lr      */
-        address_space_write_rom(&address_space_memory, 0,
-                                MEMTXATTRS_UNSPECIFIED, insn, 8);
+        /* A ROM blob, so every system reset rewrites it over whatever the
+         * previous kernel left in the RAM variant. */
+        rom_add_blob_fixed("hisilicon.trapnull", insn, sizeof(insn), 0);
     }
 
     /* RAM */
     memory_region_add_subregion(sysmem, c->ram_base, machine->ram);
+
+    /*
+     * The DDR controller decodes its whole window and the fitted chip
+     * ignores the address bits it does not have, so on silicon an access
+     * past the end of RAM wraps back onto it. Firmware relies on that:
+     * U-Boot's get_ram_size() and the Goke kernel's DRAM probe measure the
+     * chip by the wrap, and a U-Boot built for a bigger part relocates to
+     * the top of the size it was told and still runs, inside the alias.
+     * Left unmapped, that U-Boot resets in a loop here and the probes see
+     * no memory instead of the wrap. So mirror RAM across the rest of a
+     * 1 GiB window, under every device, so MMIO in that range still wins.
+     * DDR parts are powers of two; another -m is left as it is. A V1
+     * flash boot goes without: there RAM is unusable until U-Boot trains
+     * the PHY, which hisi-ddrc-v1 models with an overlay over the primary
+     * range only, and a mirror of the raw RAM would get around it.
+     */
+    if (c->ram_base && is_power_of_2(machine->ram_size) &&
+        !(c->v1_xip_boot && flash_boot)) {
+        for (uint64_t off = machine->ram_size; off < 1 * GiB;
+             off += machine->ram_size) {
+            MemoryRegion *mirror = g_new(MemoryRegion, 1);
+            char *name = g_strdup_printf("hisilicon.ram-wrap@0x%" PRIx64,
+                                         (uint64_t)c->ram_base + off);
+
+            memory_region_init_alias(mirror, NULL, name, machine->ram, 0,
+                                     machine->ram_size);
+            memory_region_add_subregion_overlap(sysmem, c->ram_base + off,
+                                                mirror, -1000);
+            g_free(name);
+        }
+    }
+
+    /*
+     * V1 DDR controller + PHY.  On a flash boot DDR stays unusable until
+     * U-Boot's reg_info table starts the PHY, so an image built without
+     * the table fails here as it does on a board (OpenIPC/firmware#2593).
+     * The PHY window sits inside the hisi-misc regbank, hence priority 1.
+     */
+    if (c->v1_xip_boot) {
+        DeviceState *ddrc = qdev_new("hisi-ddrc-v1");
+        SysBusDevice *ddrcbus = SYS_BUS_DEVICE(ddrc);
+
+        if (flash_boot) {
+            qdev_prop_set_uint64(ddrc, "ram-size", machine->ram_size);
+        }
+        sysbus_realize_and_unref(ddrcbus, &error_fatal);
+        sysbus_mmio_map(ddrcbus, 0, HISI_V1_DDRC_BASE);
+        sysbus_mmio_map_overlap(ddrcbus, 1, HISI_V1_DDRPHY_BASE, 1);
+        if (flash_boot) {
+            sysbus_mmio_map_overlap(ddrcbus, 2, c->ram_base, 1);
+        }
+    }
 
     /* CPUs — secondary CPUs start halted (held in reset until kernel brings them up) */
     for (n = 0; n < smp_cpus; n++) {
@@ -4534,6 +5372,10 @@ static void hisilicon_common_init(MachineState *machine,
                                         c->psci_conduit, &error_fatal);
             }
         }
+        if (c->arch_timer_freq) {
+            object_property_set_uint(cpuobj[n], "cntfrq", c->arch_timer_freq,
+                                     &error_fatal);
+        }
         qdev_realize(DEVICE(cpuobj[n]), NULL, &error_fatal);
         cpu[n] = ARM_CPU(cpuobj[n]);
     }
@@ -4541,7 +5383,7 @@ static void hisilicon_common_init(MachineState *machine,
     /* Mask-ROM ELF (-bios) is loaded once CPU 0 exists; the registered
      * reset hook fires after cpu_reset() to redirect PC to the ELF entry. */
     if (bios_boot) {
-        hisilicon_load_maskrom(sysmem, c, machine, cpu[0]);
+        maskrom = hisilicon_load_maskrom(sysmem, c, machine, cpu[0]);
     }
 
     /* Interrupt controller */
@@ -4650,6 +5492,11 @@ static void hisilicon_common_init(MachineState *machine,
         }
     }
 
+    /* Now that pic[] exists, wire the FMC op/DMA-done IRQ (fmc100 only). */
+    if (fmc_irq_dev && c->fmc_irq && c->fmc_irq < num_pic) {
+        sysbus_connect_irq(fmc_irq_dev, 0, pic[c->fmc_irq]);
+    }
+
     /* SysCtrl — V1–V5 IPC and DVR/NVR scheme; STB family (HiSTB) uses
      * a different sysctl register layout that the hisi-sysctl model
      * doesn't implement, so leave sysctl_base = 0 to skip. */
@@ -4662,6 +5509,10 @@ static void hisilicon_common_init(MachineState *machine,
         qdev_prop_set_uint32(sysctl, "v1-chip-id-8c", c->v1_chip_id_8c);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(sysctl), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(sysctl), 0, c->sysctl_base);
+        if (maskrom) {
+            qdev_connect_gpio_out_named(sysctl, "remap-clear", 0,
+                qemu_allocate_irq(hisilicon_maskrom_remap, maskrom, 0));
+        }
 
         /*
          * Pinstrap injection for -bios mask-ROM runs.  Real silicon
@@ -4702,15 +5553,21 @@ static void hisilicon_common_init(MachineState *machine,
         DeviceState *crg = qdev_new("hisi-crg");
         if (c->cpu_srst_offset) {
             qdev_prop_set_uint32(crg, "cpu-srst-offset", c->cpu_srst_offset);
-            if (c->max_cpus > 1) {
-                qdev_prop_set_uint32(crg, "smp-bootreg-addr",
-                                     c->sram_base + 0x100);
-                /* Address 0x4: where kernel writes secondary_startup addr */
-                qdev_prop_set_uint32(crg, "smp-entry-addr", 0x4);
-            }
+        }
+        if (c->crg_pll_lock_offset) {
+            qdev_prop_set_uint32(crg, "pll-lock-offset", c->crg_pll_lock_offset);
+            qdev_prop_set_uint32(crg, "pll-lock-bits", c->crg_pll_lock_bits);
         }
         sysbus_realize_and_unref(SYS_BUS_DEVICE(crg), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(crg), 0, c->crg_base);
+        if (c->cpu_srst_offset && smp_cpus > 1) {
+            HisiCpuRelease *r = g_new0(HisiCpuRelease, 1);
+
+            r->cpu = cpu[1];
+            r->kernel_boot = machine->kernel_filename != NULL;
+            qdev_connect_gpio_out_named(crg, "cpu1-reset", 0,
+                qemu_allocate_irq(hisilicon_cpu1_reset, r, 0));
+        }
 
         /* Pre-enable clocks (mimics U-Boot init before kernel boot) */
         for (n = 0; n < c->num_crg_defaults; n++) {
@@ -4943,6 +5800,9 @@ static void hisilicon_common_init(MachineState *machine,
         i2c_devs[n] = qdev_new(i2c_type);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(i2c_devs[n]), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(i2c_devs[n]), 0, c->i2c_bases[n]);
+        if (c->i2c_irqs[n]) {
+            sysbus_connect_irq(SYS_BUS_DEVICE(i2c_devs[n]), 0, pic[c->i2c_irqs[n]]);
+        }
     }
 
     /* MIPI RX */
@@ -5324,9 +6184,17 @@ static void hisilicon_common_init(MachineState *machine,
             info->cpu = cpu[0];
             info->entry = c->uboot_load_addr;
             qemu_register_reset(hisilicon_maskrom_cpu_reset, info);
+        } else {
+            /* ARMv7/v5: boot ROM at 0x0 (built by hisilicon_write_bootrom)
+             * copies U-Boot from the flash window to DDR; CPU starts at
+             * reset 0.  With no -kernel nothing else resets CPU0, so
+             * without this a guest SC_SYSRES reset every device but left
+             * U-Boot spinning in its reset loop. */
+            HisiMaskromReset *info = g_new0(HisiMaskromReset, 1);
+            info->cpu = cpu[0];
+            info->entry = 0;
+            qemu_register_reset(hisilicon_maskrom_cpu_reset, info);
         }
-        /* else ARMv7/v5: boot ROM at 0x0 (built by hisilicon_write_bootrom)
-         * copies U-Boot from the flash window to DDR; CPU starts at reset 0. */
     } else if (bios_boot) {
         /* Mask-ROM emulation: the bootrom ELF is already in ROM at
          * 0x04000000, and a reset hook redirects PC there.  Nothing else
@@ -5387,12 +6255,27 @@ static void hisilicon_common_init(MachineState *machine,
             machine->kernel_cmdline = g_string_free(cl, false);
         }
 
+        /*
+         * The guest is told the whole DDR, as U-Boot tells it: ATAG_MEM,
+         * which an ATAG_DTB_COMPAT kernel copies into its memory node, is
+         * what OpenIPC's load_hisilicon reads as total RAM, and it carves
+         * MMZ out of what lies above mem=.  Reporting kernel_mem_mb there
+         * instead (32M) made the firmware see total == os_mem and load no
+         * modules.
+         *
+         * kernel_mem_mb keeps its other job, placing the initrd and DTB:
+         * at its first half, exactly as before.  That is below any MMZ the
+         * command line carves -- the hisi allocator's above mem=, and the
+         * CMA one inside it (hi3516ev300 CI: mem=128M with CMA from
+         * 0x42000000; an initrd placed by mem= at +64M landed in that
+         * region and the kernel died before its console came up).
+         */
         hisilicon_binfo.ram_size = machine->ram_size;
-        if (c->kernel_mem_mb) {
-            hisilicon_binfo.ram_size = (hwaddr)c->kernel_mem_mb * MiB;
-        }
+        hisilicon_binfo.kernel_ram_size = (uint64_t)c->kernel_mem_mb * MiB;
         hisilicon_binfo.loader_start = c->ram_base;
         hisilicon_binfo.board_id = c->board_id; /* ATAGs machine_arch_type */
+        hisilicon_binfo.write_secondary_boot = hisilicon_write_secondary_boot;
+        hisilicon_binfo.secondary_cpu_reset_hook = hisilicon_reset_secondary;
         if (c->psci_conduit) {
             /* ARMv8 STB family — PSCI/SMC for SMP, suppresses upstream
              * "smpboot" stub at 0x0 that collides with the bootloader. */
@@ -5483,6 +6366,7 @@ DEFINE_HISI_MACHINE("hi3516cv200", hi3516cv200, hi3516cv200_soc)
 DEFINE_HISI_MACHINE("hi3516av100", hi3516av100, hi3516av100_soc)
 DEFINE_HISI_MACHINE("hi3516dv100", hi3516dv100, hi3516dv100_soc)
 DEFINE_HISI_MACHINE("hi3516cv300", hi3516cv300, hi3516cv300_soc)
+DEFINE_HISI_MACHINE("hi3516ev100", hi3516ev100, hi3516ev100_soc)
 DEFINE_HISI_MACHINE("hi3516cv500", hi3516cv500, hi3516cv500_soc)
 DEFINE_HISI_MACHINE("hi3516av300", hi3516av300, hi3516av300_soc)
 DEFINE_HISI_MACHINE("hi3516dv300", hi3516dv300, hi3516dv300_soc)
@@ -5493,6 +6377,7 @@ DEFINE_HISI_MACHINE("hi3516ev200", hi3516ev200, hi3516ev200_soc)
 DEFINE_HISI_MACHINE("hi3518ev300", hi3518ev300, hi3518ev300_soc)
 DEFINE_HISI_MACHINE("hi3516dv200", hi3516dv200, hi3516dv200_soc)
 DEFINE_HISI_MACHINE("gk7205v200", gk7205v200, gk7205v200_soc)
+DEFINE_HISI_MACHINE("gk7201v200", gk7201v200, gk7201v200_soc)
 DEFINE_HISI_MACHINE("gk7205v300", gk7205v300, gk7205v300_soc)
 DEFINE_HISI_MACHINE("gk7202v300", gk7202v300, gk7202v300_soc)
 DEFINE_HISI_MACHINE("gk7605v100", gk7605v100, gk7605v100_soc)
@@ -5500,6 +6385,9 @@ DEFINE_HISI_MACHINE("gk7205v500", gk7205v500, gk7205v500_soc)
 DEFINE_HISI_MACHINE("gk7205v510", gk7205v510, gk7205v510_soc)
 DEFINE_HISI_MACHINE("gk7205v530", gk7205v530, gk7205v530_soc)
 DEFINE_HISI_MACHINE("gk7202v330", gk7202v330, gk7202v330_soc)
+DEFINE_HISI_MACHINE("gk7206v10",  gk7206v10,  gk7206v10_soc)
+DEFINE_HISI_MACHINE("gk7206v12a", gk7206v12a, gk7206v12a_soc)
+DEFINE_HISI_MACHINE("gk7606v1",   gk7606v1,   gk7606v1_soc)
 DEFINE_HISI_MACHINE("hi3516cv608", hi3516cv608, hi3516cv608_soc)
 DEFINE_HISI_MACHINE("hi3516cv610", hi3516cv610, hi3516cv610_soc)
 DEFINE_HISI_MACHINE("hi3516cv613", hi3516cv613, hi3516cv613_soc)

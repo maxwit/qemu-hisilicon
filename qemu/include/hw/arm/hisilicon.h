@@ -22,7 +22,7 @@
 #define HISI_MAX_TIMERS   4
 #define HISI_MAX_SPIS     4
 #define HISI_MAX_HIMCI    3
-#define HISI_MAX_SDHCI    2
+#define HISI_MAX_SDHCI    3
 #define HISI_MAX_I2C      8
 #define HISI_MAX_REGBANKS 20
 #define HISI_MAX_CRG_DEFAULTS 8
@@ -126,6 +126,26 @@ typedef struct HisiSoCConfig {
     uint32_t        v1_chip_id_88; /* 1=CV100, 2=18EV100, 3=18AV100 */
     uint32_t        v1_chip_id_8c; /* bits[14:8]: 0x10=18CV100, 0x57=18EV100 */
 
+    /*
+     * V1 flash boot runs U-Boot in place from the SPI NOR window, the way
+     * the silicon does, instead of copying it to DDR first.  Its start.S
+     * only walks the reg_info table at image offset 0x40 (PLL, DDR
+     * controller, pin mux) when it finds itself outside DDR, so a copy
+     * to DDR skipped that table and an image whose table was empty booted
+     * here and bricked real boards (OpenIPC/firmware#2593).  It also
+     * creates the hisi-ddrc-v1 controller: DDR reads as zero and drops
+     * writes until the table has started the DDR PHY.
+     */
+    bool            v1_xip_boot;
+
+    /*
+     * CRG register that reports PLL lock, one bit per PLL, and the bits
+     * that read as locked.  V1 reg_info tables poll CRG+0xe8 for 0xf
+     * after programming the four PLLs.  0 = no such register.
+     */
+    uint32_t        crg_pll_lock_offset;
+    uint32_t        crg_pll_lock_bits;
+
     /* UARTs (PL011) */
     int             num_uarts;
     hwaddr          uart_bases[HISI_MAX_UARTS];
@@ -136,6 +156,13 @@ typedef struct HisiSoCConfig {
     hwaddr          timer_bases[HISI_MAX_TIMERS];
     int             timer_irqs[HISI_MAX_TIMERS];
     uint32_t        timer_freq;     /* 0 = device default */
+    /*
+     * ARM generic timer (CNTFRQ) rate.  QEMU's Cortex-A7 counter runs at
+     * 62.5 MHz unless told otherwise, but vendor DTS arm,armv7-timer nodes
+     * pin clock-frequency (50 MHz V4/V4A, 24 MHz V3A), and the kernel then
+     * converts counter ticks to time at the DT rate.  0 = QEMU default.
+     */
+    uint32_t        arch_timer_freq;
     /*
      * Goke V500 "xmsp804": one hisi-xmsp804 device (4 single-timer blocks at
      * 0x100 stride) at timer_bases[0] instead of the stock dual-timer sp804s.
@@ -152,6 +179,12 @@ typedef struct HisiSoCConfig {
     hwaddr          fmc_ctrl_base;  /* 0 = no flash controller */
     hwaddr          fmc_mem_base;
     const char     *fmc_type;       /* NULL = "hisi-fmc", or "hisi-sfc350" */
+    /* hisi-fmc register-map variant: 0 = HiFMC V100 (default), 1 = fmc100
+     * ("lotus,fmc" on Goke xmorca / GK7206 — same IP, shuffled offsets). */
+    uint32_t        fmc_variant;
+    /* FMC op/DMA-done IRQ (GIC SPI).  0 = unconnected (V100 users poll);
+     * the fmc100 driver waits on an interrupt for DMA completion. */
+    int             fmc_irq;
 
     /* GPIO (PL061) */
     hwaddr          gpio_base;
@@ -206,6 +239,11 @@ typedef struct HisiSoCConfig {
     int             num_i2c;
     hwaddr          i2c_bases[HISI_MAX_I2C];
     const char     *i2c_type;       /* NULL = "hisi-i2c", or "hisi-i2c-v1" */
+    /* GIC SPI of each controller; 0 = not wired. A kernel whose device tree
+     * gives the controllers interrupts runs i2c-hibvt in interrupt mode and
+     * waits for them -- 1 s per message, then "rx/tx timeout", when the line
+     * goes nowhere. */
+    int             i2c_irqs[HISI_MAX_I2C];
 
     /* MIPI RX (CSI-2 / LVDS receiver) */
     hwaddr          mipi_rx_base;   /* 0 = no MIPI RX */
@@ -409,11 +447,35 @@ typedef struct HisiSoCConfig {
 #define GOKE_SOC_ID_7205V300    0x72050300  /* = hi3516ev300 */
 #define GOKE_SOC_ID_7202V300    0x72020300  /* = hi3518ev300 */
 #define GOKE_SOC_ID_7605V100    0x76050100  /* = hi3516dv200 */
+#define GOKE_SOC_ID_7201V200    0x72010200  /* ~hi3516ev200 stripped (1M/2M IPC) */
 
 /* Goke next-gen — own design, V4-compatible address map + NPU (2022+) */
 #define GOKE_SOC_ID_7205V500    0x72050500  /* 5M, 0.5 TOPS, 512Mb DDR2 */
 #define GOKE_SOC_ID_7205V510    0x72050510  /* 5M, 1.0 TOPS, 1Gb DDR3 */
 #define GOKE_SOC_ID_7205V530    0x72050530  /* 5M, 1.0 TOPS, ext DDR */
 #define GOKE_SOC_ID_7202V330    0x72020330  /* 5M, 0.5 TOPS, no FEPHY */
+
+/*
+ * Goke third generation (2025-2026) — Goke's own designs on the XMedia
+ * "Lotus" SDK (ShiMetaPi shimetapi_pico_gx), split into two product lines
+ * the way HiSilicon splits 3516 (mainstream) / 3519 (high-end):
+ *   GK7206 — codename "xmorca",  Cortex-A7 MP2, embedded DDR, 5M (V10) / 4K (V11+).
+ *   GK7606 — codename "xmfalcon", Cortex-A55, external DDR, 4K.
+ * Both keep the gk7205v5xx-style 0x12xxxxxx control block (sysctl
+ * 0x12020000, CRG 0x12010000, UART 0x12040000, xmedia,sp804 0x12000000),
+ * RAM @0x40000000, an ATF BL1->BL31->BL33(u-boot) chain, and a RISC-V MCU
+ * coprocessor.  The chip ID is read from REG_SC_CHIPID = sysctl_base + 0xEE0
+ * (= 0x12020EE0, verified in the SDK u-boot arch-xmorca/platform.h).  The
+ * ID *values* below are PLACEHOLDERS pending a live SCSYSID/CHIPID capture —
+ * the xmorca values are not in the SDK source (u-boot and the kernel just
+ * print whatever they read).  They follow the encoding the SDK kernel's
+ * lotus/machine/xmfalcon/include/platform.h uses for its siblings
+ * (CHIPID_XM7605V12 = 0x76050120, CHIPID_XM7606V13 = 0x76060130): part
+ * number, then the Vxy version as 0xxy0.  The "A" suffix's encoding is
+ * unknown.  The 5.10 kernel only prints the xmorca ID (/proc/soc_info);
+ * no driver branches on it. */
+#define GOKE_SOC_ID_7206V10     0x72060100  /* GK7206V10, dual A7 MP2, 1.0 TOPS; placeholder */
+#define GOKE_SOC_ID_7206V12A    0x72060120  /* GK7206V12A, 2Gb DDR3L, 4K; placeholder */
+#define GOKE_SOC_ID_7606V1      0x76060100  /* GK7606V1, A55 4K; placeholder */
 
 #endif /* HW_ARM_HISILICON_H */

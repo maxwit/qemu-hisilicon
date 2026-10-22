@@ -34,7 +34,7 @@ Goke chips are die-identical HiSilicon V4 silicon with different branding:
 | gk7202v300 | hi3518ev300 | `0x72020300` |
 | gk7605v100 | hi3516dv200 | `0x76050100` |
 | gk7201v200 | (~ev200 stripped) | `0x72010200` |
-| gk7201v300 | (~ev300 stripped) | `0x72010300` |
+| gk7201v300 | (~ev200 stripped, re-ID of gk7201v200) | `0x72010300` |
 | gk7202v330 | (~18ev300 variant) | `0x72020330` |
 | gk7205v500 | (new gen) | `0x72050500` |
 | gk7205v510 | (new gen) | `0x72050510` |
@@ -398,3 +398,18 @@ The build matrix groups (comments in build.yml) align perfectly with:
 ### NVR SoCs (3536cv100, 3536dv100, 3520dv200)
 These are video recorder chips, not cameras. Different use case but similar
 IP blocks. Low priority for emulation unless specifically requested.
+
+### Xiongmai Is Not HiSilicon
+XM510/XM530/XM550 kernels started from HiSilicon BSP templates, but the
+silicon is not a clone the way Goke is:
+- **Memory map:** Xiongmai's own. The VIC is at 0x20010000 and the peripherals
+  sit at 0x100x0000 and 0x200x0000.
+- **Flash controller:** xmsfc, not HiFMC.
+- **Ethernet:** a Synopsys DWMAC with its MAC block rearranged, not FEMAC.
+- **GPIO:** one register per pin.
+
+That is why they are a separate family: `hw/arm/xiongmai.c` with
+`XmSoCConfig` (`include/hw/arm/xiongmai.h`), rather than more `HisiSoCConfig`
+slots that would sit empty. The generic ARM IP comes from upstream QEMU, as it
+does for HiSilicon. `hisi-regbank` is reused for unmodelled blocks. The
+hardware reference with kernel-source citations is `docs/xiongmai.md`.

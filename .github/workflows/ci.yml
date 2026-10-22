@@ -18,7 +18,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential ninja-build meson pkg-config \
             libglib2.0-dev libpixman-1-dev libfdt-dev zlib1g-dev libslirp-dev \
-            python3 python3-venv git gcc-arm-linux-gnueabi libc6-dev-armel-cross
+            python3 python3-venv git gcc-arm-linux-gnueabi libc6-dev-armel-cross \
+            python3-pil ffmpeg
 
       - name: Build QEMU
         run: bash qemu/setup.sh
@@ -39,6 +40,96 @@ jobs:
           [ "$count" -ge 21 ]
           # aarch64 V5 machines (Hi3519DV500 / Hi3516DV500)
           ./qemu-src/build/qemu-system-aarch64 -machine help | grep -E 'hi3519dv500|hi3516dv500'
+          # Xiongmai family (hw/arm/xiongmai.c), not HiSilicon-derived
+          ./qemu-src/build/qemu-system-arm -machine help | grep -E '^xm510 '
+          ./qemu-src/build/qemu-system-arm -machine help | grep -E '^xm530 '
+          ./qemu-src/build/qemu-system-arm -machine help | grep -E '^xm550 '
+          # Goke GK7101/GK7102 (hw/arm/goke.c), Goke's own Ambarella-IP design
+          ./qemu-src/build/qemu-system-arm -machine help | grep -E '^gk7101 '
+          ./qemu-src/build/qemu-system-arm -machine help | grep -E '^gk7102 '
+          # SigmaStar infinity2m (hw/arm/sigmastar.c)
+          ./qemu-src/build/qemu-system-arm -machine help | grep -E '^ssr621q '
+          ./qemu-src/build/qemu-system-arm -machine help | grep -E '^ssd202d '
+          ./qemu-src/build/qemu-system-arm -machine help | grep -E '^ssd201 '
+          # Novatek NT9856x (hw/arm/novatek.c)
+          ./qemu-src/build/qemu-system-arm -machine help | grep -E '^nt98562 '
+          ./qemu-src/build/qemu-system-arm -machine help | grep -E '^nt98566 '
+          ./qemu-src/build/qemu-system-aarch64 -machine help | grep -E '^nt98332 '
+
+      - name: SPI-NAND erase/program addressing (hisi-fmc)
+        run: bash qemu/tests/test-hisi-fmc-nand-erase.sh
+
+      - name: CPU1 release via CRG soft-reset (hisi-crg, -bios path)
+        run: bash qemu/tests/test-hisi-smp-release.sh
+
+      - name: V1 DDR needs the reg_info table (hisi-ddrc-v1, flash boot)
+        run: bash qemu/tests/test-hisi-v1-ddr-init.sh
+
+      # The Hantro H1 driven over qtest the way mainline Linux's
+      # hantro_h1_jpeg_enc.c drives it; the JPEG must decode and match
+      # libjpeg's encode of the same frame.
+      - name: Hantro H1 JPEG encode (xm-h1)
+        run: python3 qemu/tests/test-xm-h1-jpeg.py
+
+      # H.264 the way Hantro's library drives it: majestic's own SPS/PPS
+      # ahead of the output, the header remainder in STR_HDR_REM; ffmpeg must
+      # decode every frame.
+      - name: Hantro H1 H.264 encode (xm-h1)
+        run: python3 qemu/tests/test-xm-h1-h264.py
+
+      # The XM530 pad controller as the gpio-xm530 kernel driver and the
+      # vendor ISP drive it: output levels, input lines, mux bits kept.
+      - name: XM530 pad GPIO (xm-gpio)
+        run: python3 qemu/tests/test-xm-gpio.py
+
+      # XM510's banked GPIO: data/output enable per port, muxed pins idle.
+      - name: XM510 GPIO (xm510-gpio)
+        run: python3 qemu/tests/test-xm510-gpio.py
+
+      # The XM510/XM530 watchdog: SP805 identity, so Linux's sp805_wdt
+      # binds; fed it stays armed, unfed it resets the machine.
+      - name: XM SP805 watchdog (arm-sp805)
+        run: python3 qemu/tests/test-xm-sp805.py
+
+      # The GK710x models driven over qtest at the silicon addresses the
+      # vendor HAL drives: boot-ROM header, SPI-NOR byte order and
+      # write-back, timer edge into the VIC, I2C to a sensor, watchdog.
+      # Boot tests need the vendor HAL, which is not redistributable.
+      - name: Goke GK710x devices (gk-sflash, gk-vic, gk-idc, ...)
+        run: python3 qemu/tests/test-gk710x.py
+
+      # The GK7102S / GK7102C machine: the same models in the S register
+      # layouts the vendor drivers use directly (gk-remap), its boot
+      # header, and the DMA controller the GK7102C U-Boot checks.
+      - name: Goke GK710xS devices (gk-remap, gk-dma)
+        run: python3 qemu/tests/test-gk710xs.py
+
+      # The Anyka AK39xx models driven over qtest the way the vendor drivers
+      # drive them: mask-ROM staging of the boot header, timer into the
+      # two-level interrupt controller, UART and SPI through L2 memory
+      # (PIO and DMA), SPI-NOR write-back, both I2C layouts, the GMAC's
+      # PHY and 24-byte descriptor ring, an empty SD slot.  Boot tests
+      # need camera dumps, which are vendor firmware.
+      - name: Anyka AK39xx devices (ak-sysctrl, ak-l2, ak-spi, ...)
+        run: python3 qemu/tests/test-anyka.py
+
+      # The SigmaStar infinity2m models driven over qtest the way the vendor
+      # IPL, U-Boot and kernel drive them: mask-ROM staging of the IPL, RIU
+      # storage and boot status bits, timers into the main-intc, the FSP's
+      # three-command sequences and the BDMA page program written back to
+      # the image, the EMAC's 16-bit halves and a frame on the wire, EHCI
+      # through the halves with a USB keyboard, AHCI with a disk, GE and
+      # vsync.  Boot tests need an NVR flash dump, which is vendor firmware.
+      - name: SigmaStar infinity2m devices (sstar-fsp, sstar-emac, ...)
+        run: python3 qemu/tests/test-sigmastar.py
+
+      # The Novatek NT9856x models driven over qtest the way the vendor
+      # kernel drives them: chip ID, the CG PLL8 rate periph_clk comes from,
+      # the keyed watchdog (interrupt, reset, the kernel's manual reset),
+      # GPIO pads and both interrupt kinds, the RTC's CSET handshake and its
+      # power-off-with-alarm reboot, and the device tree the machine builds.
+      - name: Novatek NT9856x devices (nvt-top, nvt-cg, nvt-rtc, ...)
+        run: python3 qemu/tests/test-novatek.py
 
       - name: Upload QEMU binary
         uses: actions/upload-artifact@v4
@@ -417,6 +508,15 @@ jobs:
             uboot_bin: u-boot-hi3516cv300-universal.bin
             flash_mem: 256M
 
+          # The 1M sibling of cv300: same die and map, 64 MiB, SCSYSID0
+          # variant byte 4.
+          - name: hi3516ev100
+            soc: hi3516ev100
+            machine: hi3516ev100
+            append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            ping_linux: true
+            uboot_bin: u-boot-hi3516ev100-universal.bin
+
           # cv500 family covers av300 (same die, av300 is variant id 5);
           # one Linux + U-Boot gate exercises both.  flash_mem=1G because
           # the OpenIPC cv500 U-Boot is built assuming the platform-max
@@ -427,6 +527,8 @@ jobs:
             soc: hi3516cv500
             machine: hi3516cv500
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            # Dual Cortex-A7: CPU1 released through CRG REG_CPU_SRST_CRG (#34)
+            smp: 2
             ping_linux: true
             uboot_bin: u-boot-hi3516cv500-universal.bin
             flash_mem: 1G
@@ -499,6 +601,69 @@ jobs:
             ping_linux: true
             uboot_bin: u-boot-hi3536dv100-universal.bin
 
+          # Xiongmai XM510 (hw/arm/xiongmai.c): the vendor 3.0.101 kernel on a
+          # PL190 VIC, SP804, xmsfc NOR and the xmmac DWMAC 10/100.  No
+          # uboot_bin -- OpenIPC publishes no XM U-Boot.  flash_rw runs the
+          # xmsfc erase/program path on an 8 MiB NOR, the only size the
+          # XM510 kernel's chip table knows.
+          # mem= first, as U-Boot passes it: load_xiongmai sizes MMZ from the
+          # first argument, and without it lays MMZ over the whole kernel.
+          # Since the media blocks are modelled, VI and the H1 really write
+          # those buffers, and the guest dies or corrupts its overlay.
+          # mem=20M rather than the board's 18M: the -initrd boot needs it
+          # (QEMU loads the initrd at 16 MiB, half of RAM), and at 18M
+          # `sysupgrade --archive` refuses on silicon too, with no room in
+          # /tmp to unpack it.  test-xm-stream.sh runs the board's 18M.
+          - name: xm510
+            soc: xm510
+            machine: xm510
+            append: "mem=20M console=ttyAMA0,115200 root=/dev/ram0 rootfstype=squashfs mtdparts=xm_sfc:256k(boot),64k(env),2048k(kernel),5120k(rootfs),-(rootfs_data)"
+            ping_linux: true
+            flash_rw: true
+            flash_rw_mem: 32M
+            mtd_name: xm_sfc
+            flash_mb: 8
+            cmdline_prefix: "mem=20M"
+            # sysupgrade, firstboot and the firmware#2613 overlay case, on the
+            # 32 MB board where sysupgrade's RAM phase is tightest.
+            flash_tests: true
+            overlay_keep: true
+            # Last xm510 kernel without jffs2 xattrs (before firmware#2606).
+            overlay_keep_kernel: nightly-20261015-1d9c834
+            stream_test: true
+
+          # Xiongmai XM530 (hw/arm/xiongmai.c): dual Cortex-A5 MPCore (A9
+          # stand-in, GIC, TWD, PL310), xmsfc v2, DWMAC at 0x10010000.  CPU1
+          # comes up through REG_SC_REMAP + REG_CPU1_SOFT_RST as on silicon.
+          #
+          # The flash tests put mem= FIRST (cmdline_prefix), as OpenIPC's
+          # U-Boot passes it: load_xiongmai sizes MMZ from the first
+          # argument, and without it lays MMZ over all of RAM, majestic
+          # Oopses in mmz, never stops the xm_wdt the same script started,
+          # and the guest resets a minute later.  Not on the -initrd boot
+          # above: QEMU loads the initrd high in RAM, past a mem=32M kernel.
+          - name: xm530
+            soc: xm530
+            machine: xm530
+            smp: 2
+            append: "console=ttyAMA0,115200 root=/dev/ram0 rootfstype=squashfs mtdparts=xm_sfc:256k(boot),64k(env),2048k(kernel),5120k(rootfs),-(rootfs_data)"
+            ping_linux: true
+            flash_rw: true
+            flash_rw_mem: 64M
+            mtd_name: xm_sfc
+            flash_mb: 8
+            cmdline_prefix: "mem=32M"
+            flash_tests: true
+            stream_test: true
+
+          # XM550 is the XM530 die with 128 MB; OpenIPC ships it the xm530
+          # image, so this boots that bundle on the 128 MB machine.
+          - name: xm550
+            soc: xm530
+            machine: xm550
+            smp: 2
+            append: "console=ttyAMA0,115200 root=/dev/ram0 rootfstype=squashfs mtdparts=xm_sfc:256k(boot),64k(env),2048k(kernel),5120k(rootfs),-(rootfs_data)"
+
     continue-on-error: ${{ matrix.allow_failure == true }}
 
     steps:
@@ -528,16 +693,26 @@ jobs:
           sudo ip link set qbr0 up
           sudo ip link set tap0 up
           sudo ip addr add 10.0.10.1/24 dev qbr0
+          # Second host address, off the guest's subnet on purpose: it is
+          # advertised as the guest's DNS server, so a query only reaches us if
+          # the guest installed and used the default route we handed it.
+          sudo ip addr add 10.0.20.1/24 dev qbr0
           sudo iptables -I INPUT -i qbr0 -j ACCEPT
           # HTTP server for TCP connectivity test (validates TX checksum offload)
           python3 -m http.server 8080 --bind 10.0.10.1 &
           # dnsmasq: DHCP + DNS forwarder on the bridge
-          sudo dnsmasq --interface=qbr0 --bind-interfaces --listen-address=10.0.10.1 \
+          sudo dnsmasq --interface=qbr0 --bind-interfaces \
+            --listen-address=10.0.10.1 --listen-address=10.0.20.1 \
             --dhcp-range=10.0.10.50,10.0.10.99,255.255.255.0,1h \
-            --dhcp-option=3,10.0.10.1 --dhcp-option=6,10.0.10.1 \
+            --dhcp-option=3,10.0.10.1 --dhcp-option=6,10.0.20.1 \
             --no-resolv --server=8.8.8.8 \
-            --no-daemon --log-dhcp --pid-file=/tmp/dnsmasq.pid &
+            --no-daemon --log-dhcp --log-queries \
+            --log-facility=/tmp/dnsmasq-ci.log \
+            --pid-file=/tmp/dnsmasq.pid &
           sleep 1
+          # The network check reads the lease and the guest's DNS queries out
+          # of this log instead of driving a shell in the guest.
+          sudo touch /tmp/dnsmasq-ci.log && sudo chmod 0644 /tmp/dnsmasq-ci.log
 
       - name: Download firmware
         run: |
@@ -565,7 +740,7 @@ jobs:
           # the rest of init runs deterministically.
           QEMU=./qemu-src/build/qemu-system-arm
           timeout 120 $QEMU \
-            -M ${{ matrix.machine }} \
+            -M ${{ matrix.machine }} -smp ${{ matrix.smp || 1 }} \
             -kernel "qemu-boot/uImage.${{ matrix.soc }}" \
             -initrd "qemu-boot/rootfs.squashfs.${{ matrix.soc }}" \
             -nographic -serial mon:stdio \
@@ -595,6 +770,19 @@ jobs:
                 exit 1
               fi
               echo "=== Chip-id detection OK ==="
+
+              # Regression: #34 — secondary CPUs must come online, not
+              # time out and leave the kernel on CPU0 alone.
+              SMP=${{ matrix.smp || 1 }}
+              if [ "$SMP" -gt 1 ]; then
+                if grep -q "failed to come online" boot-output.txt ||
+                   ! grep -q "Brought up $SMP CPUs" boot-output.txt; then
+                  echo "=== FAIL: SMP bringup broken (#34) ==="
+                  grep -nE "CPU[0-9]+:|Brought up" boot-output.txt
+                  exit 1
+                fi
+                echo "=== SMP bringup OK: $SMP CPUs ==="
+              fi
               exit 0
             fi
             sleep 1
@@ -606,21 +794,179 @@ jobs:
           kill $QEMU_PID 2>/dev/null || true
           exit 1
 
+      - name: "Guest reboot boots the kernel again"
+        timeout-minutes: 4
+        run: |
+          # init=/bin/false: PID 1 exits, the kernel panics, and panic=1
+          # sends it through its restart handler a second later (SC_SYSRES
+          # on every matrix SoC).  A second "Linux version" banner proves
+          # the whole reset path: the guest's restart code reaches
+          # SC_SYSRES (hi3516cv100's tcm_slow_reset), QEMU resets, and the
+          # rebooted kernel gets far enough to print (the vendor GIC
+          # driver's GDIF flag at sysctrl+0x130 must not survive reset).
+          # 3.x kernels that ignore a missing init= still exec /bin/false.
+          QEMU=./qemu-src/build/qemu-system-arm
+          : > reboot-output.txt
+          timeout 180 $QEMU \
+            -M ${{ matrix.machine }} -smp ${{ matrix.smp || 1 }} \
+            -kernel "qemu-boot/uImage.${{ matrix.soc }}" \
+            -initrd "qemu-boot/rootfs.squashfs.${{ matrix.soc }}" \
+            -nographic -serial file:reboot-output.txt -monitor none \
+            -nic user,restrict=on \
+            -append '${{ matrix.append }} init=/bin/false panic=1' \
+            -d unimp,guest_errors -D qemu-boot/qemu-reboot.log &
+          QEMU_PID=$!
+
+          for i in $(seq 1 170); do
+            if [ "$(grep -c 'Linux version' reboot-output.txt 2>/dev/null)" -ge 2 ]; then
+              kill $QEMU_PID 2>/dev/null || true
+              echo "=== Reboot OK: kernel booted a second time after ${i} s ==="
+              exit 0
+            fi
+            sleep 1
+          done
+
+          kill $QEMU_PID 2>/dev/null || true
+          echo "=== FAIL: no second boot after the guest restarted ==="
+          grep -c SC_SYSRES qemu-boot/qemu-reboot.log || true
+          echo "--- Last 30 lines of output ---"
+          tail -30 reboot-output.txt
+          exit 1
+
+      - name: "Guest clock runs at wall-clock speed"
+        timeout-minutes: 5
+        # The login prompt appears even when the guest timebase disagrees
+        # with the rate the DTB gives the kernel (SP804 vs clk_3m, generic
+        # timer vs arm,armv7-timer clock-frequency), so assert it directly:
+        # init=/bin/sh, /proc/uptime sampled 20 s of host time apart.
+        run: |
+          python3 qemu-boot/test-guest-clock.py \
+            --qemu ./qemu-src/build/qemu-system-arm \
+            --machine "${{ matrix.machine }}" \
+            --smp ${{ matrix.smp || 1 }} \
+            --kernel "qemu-boot/uImage.${{ matrix.soc }}" \
+            --initrd "qemu-boot/rootfs.squashfs.${{ matrix.soc }}" \
+            --log "qemu-boot/guest-clock-${{ matrix.soc }}.log"
+
       - name: "SPI-NOR erase/program round-trip"
         if: matrix.flash_rw
-        timeout-minutes: 5
+        timeout-minutes: 8
         run: |
           bash qemu-boot/test-flash-rw.sh \
             --soc "${{ matrix.soc }}" \
             --machine "${{ matrix.machine }}" \
             --qemu ./qemu-src/build/qemu-system-arm \
             --output-dir "qemu-boot/flash-rw-${{ matrix.soc }}" \
-            --mem 128M \
-            --login-timeout 120
+            --mem "${{ matrix.flash_rw_mem || '128M' }}" \
+            --mtd-name "${{ matrix.mtd_name || 'hi_sfc' }}" \
+            --flash-mb "${{ matrix.flash_mb || 16 }}" \
+            --cmdline-prefix "${{ matrix.cmdline_prefix || '' }}" \
+            --timeout 240
 
-      - name: "Linux ping + curl test"
+      # majestic, left to start on its own, must reach the H1 and produce
+      # H.264 ffmpeg decodes: VI, the ISP's frame interrupts and the
+      # encoder model together.  Judged from the dumped jobs, since the
+      # camera stays unclaimed.
+      - name: "majestic H.264 end to end"
+        if: matrix.stream_test
+        timeout-minutes: 6
+        run: |
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          bash qemu-boot/test-xm-stream.sh \
+            --soc "${{ matrix.soc }}" --machine "${{ matrix.machine }}" \
+            --qemu ./qemu-src/build/qemu-system-arm \
+            --output-dir "$RUNNER_TEMP/stream-${{ matrix.soc }}"
+
+      - name: "Flash-level firmware tests: dependencies"
+        if: matrix.flash_tests
+        run: sudo apt-get install -y --no-install-recommends mtd-utils attr squashfs-tools dosfstools
+
+      - name: "sysupgrade from a local archive"
+        if: matrix.flash_tests
+        timeout-minutes: 12
+        run: |
+          bash qemu-boot/test-sysupgrade.sh \
+            --soc "${{ matrix.soc }}" --machine "${{ matrix.machine }}" \
+            --qemu ./qemu-src/build/qemu-system-arm \
+            --output-dir "$RUNNER_TEMP/sysupgrade-${{ matrix.soc }}" \
+            --mem "${{ matrix.flash_rw_mem || '128M' }}" \
+            --mtd-name "${{ matrix.mtd_name || 'hi_sfc' }}" \
+            --flash-mb "${{ matrix.flash_mb || 16 }}" \
+            --cmdline-prefix "${{ matrix.cmdline_prefix || '' }}"
+
+      - name: "firstboot wipes the overlay"
+        if: matrix.flash_tests
+        timeout-minutes: 10
+        run: |
+          bash qemu-boot/test-firstboot.sh \
+            --soc "${{ matrix.soc }}" --machine "${{ matrix.machine }}" \
+            --qemu ./qemu-src/build/qemu-system-arm \
+            --output-dir "$RUNNER_TEMP/firstboot-${{ matrix.soc }}" \
+            --mem "${{ matrix.flash_rw_mem || '128M' }}" \
+            --mtd-name "${{ matrix.mtd_name || 'hi_sfc' }}" \
+            --flash-mb "${{ matrix.flash_mb || 16 }}" \
+            --cmdline-prefix "${{ matrix.cmdline_prefix || '' }}"
+
+      - name: "init keeps an unmountable overlay that holds settings (firmware#2613)"
+        # Only a kernel without jffs2 xattrs can refuse the overlay, so rows
+        # opt in (overlay_keep: true); XM530's kernel has them.  Opt-in, not
+        # "!= false": Actions compares a missing value equal to false.
+        if: matrix.flash_tests && matrix.overlay_keep == true
+        timeout-minutes: 6
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # The fix is OpenIPC/firmware 5c01f0a92.  Release images built before
+        # it erase the overlay, which is the bug, not a reason to go red here:
+        # run once the image under test carries the commit, which the build
+        # SHA in its os-release says.
+        run: |
+          d=$(mktemp -d)
+          unsquashfs -q -d "$d/r" "qemu-boot/rootfs.squashfs.${{ matrix.soc }}" usr/lib/os-release >/dev/null
+          sha=$(sed -n 's/^BUILD_ID=.*-\([0-9a-f]\{7,\}\)$/\1/p' "$d/r/usr/lib/os-release")
+          echo "image build: ${sha:-unknown}"
+          [ -n "$sha" ] || { echo "::error::no build SHA in the image's os-release"; exit 1; }
+          st=$(gh api "repos/OpenIPC/firmware/compare/5c01f0a92...${sha}" --jq .status) ||
+            { echo "::error::cannot compare ${sha} with 5c01f0a92"; exit 1; }
+          case "$st" in
+            ahead|identical) ;;
+            behind|diverged)
+              echo "::notice::release image ${sha} does not contain firmware#2613 (compare: ${st}); skipped"
+              exit 0 ;;
+            *) echo "::error::unexpected compare status '${st}'"; exit 1 ;;
+          esac
+          # The scenario needs a kernel WITHOUT jffs2 xattrs meeting an
+          # overlay written with them.  xm510 has had them since
+          # firmware#2606, so the kernel comes from the last nightly before
+          # that (matrix.overlay_keep_kernel), and the rootfs -- the thing
+          # under test -- from the current release.  A pinned asset that has
+          # gone is an error, not a skip: the coverage must not vanish quietly.
+          kernel="qemu-boot/uImage.${{ matrix.soc }}"
+          if [ -n "${{ matrix.overlay_keep_kernel }}" ]; then
+            curl -fsSL "https://github.com/OpenIPC/firmware/releases/download/${{ matrix.overlay_keep_kernel }}/openipc.${{ matrix.soc }}-nor-lite.tgz" \
+              -o "$d/pinned.tgz" ||
+              { echo "::error::cannot fetch the pinned kernel from ${{ matrix.overlay_keep_kernel }}"; exit 1; }
+            tar xzf "$d/pinned.tgz" -C "$d" "uImage.${{ matrix.soc }}"
+            kernel="$d/uImage.${{ matrix.soc }}"
+          fi
+          bash qemu-boot/test-overlay-keep.sh \
+            --soc "${{ matrix.soc }}" --machine "${{ matrix.machine }}" \
+            --kernel "$kernel" \
+            --qemu ./qemu-src/build/qemu-system-arm \
+            --output-dir "$RUNNER_TEMP/overlay-keep-${{ matrix.soc }}" \
+            --mem "${{ matrix.flash_rw_mem || '128M' }}" \
+            --mtd-name "${{ matrix.mtd_name || 'hi_sfc' }}" \
+            --flash-mb "${{ matrix.flash_mb || 16 }}" \
+            --cmdline-prefix "${{ matrix.cmdline_prefix || '' }}"
+
+      - name: "Linux network test"
         if: matrix.ping_linux
-        timeout-minutes: 4
+        timeout-minutes: 8
+        # --ping-timeout is the wait for dropbear's banner on :22.  In
+        # practice the banner only arrives once load_hisilicon finishes;
+        # with guest time at wall-clock speed that is ~70 s after the DHCP
+        # lease on hi3519v101 (its generic timer used to run 2.6x fast,
+        # which hid the vendor modules' timed waits).  The loop exits on
+        # the first banner, so the larger budget costs fast SoCs nothing.
         run: |
           bash qemu-boot/test-linux-network.sh \
             --soc "${{ matrix.soc }}" \
@@ -629,10 +975,12 @@ jobs:
             --qemu ./qemu-src/build/qemu-system-arm \
             --tap tap0 \
             --host-ip 10.0.10.1 \
-            --login-timeout 120 \
-            --ping-timeout 45 \
-            --curl-timeout 100 \
+            --login-timeout 150 \
+            --ping-timeout 150 \
+            --curl-timeout 60 \
             --curl-max-time 90 \
+            --dns-ip 10.0.20.1 \
+            --dnsmasq-log /tmp/dnsmasq-ci.log \
             --output-dir "qemu-boot/linux-network-${{ matrix.soc }}"
 
       - name: "U-Boot ping test"
@@ -761,15 +1109,63 @@ jobs:
             boot-output.txt
             qemu-boot/qemu.log
             qemu-boot/linux-network-${{ matrix.soc }}
+            qemu-boot/guest-clock-${{ matrix.soc }}.log
             /tmp/*-ping.txt
             /tmp/linux-network-summary.txt
           retention-days: 7
 
   # hi3516cv610 (V5).  Unlike the SoCs in the matrix above, OpenIPC ships
-  # cv610 as a single firmware.bin (a FIT holding the kernel + dtb, with the
-  # SquashFS rootfs appended) under the SoC-family name "hi3516cv6xx",
-  # "ultimate" variant.  Split it into kernel/dtb/rootfs and boot like
-  # qemu-boot/run-cv610.sh.
+  # cv610 as a single firmware.bin under the SoC-family name "hi3516cv6xx",
+  # "ultimate" variant: since OpenIPC/firmware#2638 the split NOR image (a
+  # legacy uImage -- the zImage with its DTB appended -- then the SquashFS at
+  # the next 64 KiB) in openipc.hi3516cv6xx-nor-ultimate-split.tgz; before it
+  # a FIT holding the kernel + dtb with the SquashFS appended, in the plain
+  # package.  Take whichever is published, split it into kernel(/dtb)/rootfs
+  # and boot like qemu-boot/run-cv610.sh.
+  # OpenIPC nt98562/nt98566 lite: the release kernel, with the device tree
+  # the machine builds, to a PID-1 script that checks the vendor drivers
+  # bound and reboots (RTC power-off with the wake alarm armed).  Not in the
+  # boot matrix: that boots the SquashFS from a RAM disk, and this kernel
+  # has none; flash boot is not modelled yet.
+  boot-novatek:
+    name: Boot ${{ matrix.soc }}
+    needs: build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        soc: [nt98562, nt98566]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfdt1 libglib2.0-0 libpixman-1-0 libslirp0 squashfs-tools cpio
+
+      - name: Download QEMU binary
+        uses: actions/download-artifact@v4
+        with:
+          name: qemu-arm
+          path: qemu-src/build/
+
+      - name: Make QEMU executable
+        run: chmod +x qemu-src/build/qemu-system-arm
+
+      - name: Download OpenIPC firmware
+        run: |
+          cd qemu-boot
+          curl -sfL -o fw.tgz \
+            "https://github.com/OpenIPC/firmware/releases/download/latest/openipc.${{ matrix.soc }}-nor-lite.tgz"
+          tar xzf fw.tgz
+
+      - name: Boot to PID 1 and reboot
+        run: bash qemu-boot/test-novatek-boot.sh --soc ${{ matrix.soc }}
+
+      - name: HDAL media engines bound by load_novatek
+        run: bash qemu-boot/test-novatek-hdal.sh --soc ${{ matrix.soc }}
+
   boot-hi3516cv610:
     name: Boot hi3516cv610
     needs: build
@@ -793,20 +1189,41 @@ jobs:
         run: chmod +x qemu-src/build/qemu-system-arm
 
       - name: Download and split OpenIPC firmware
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           cd qemu-boot
-          curl -sL "https://github.com/OpenIPC/firmware/releases/download/latest/openipc.hi3516cv6xx-nor-ultimate.tgz" \
-              -o openipc.hi3516cv6xx-nor-ultimate.tgz
-          tar xzf openipc.hi3516cv6xx-nor-ultimate.tgz
+          # The split package on latest, else the plain one; and when latest
+          # has neither (between a format change and the nightly that
+          # publishes the new one) the newest nightly-* release with either.
+          fetch() {
+            for name in openipc.hi3516cv6xx-nor-ultimate-split.tgz openipc.hi3516cv6xx-nor-ultimate.tgz; do
+              curl -sfL "https://github.com/OpenIPC/firmware/releases/download/$1/$name" -o fw.tgz && return 0
+            done
+            return 1
+          }
+          if ! fetch latest; then
+            for tag in $(gh release list -R OpenIPC/firmware --limit 30 --json tagName --jq '.[].tagName' | grep '^nightly-'); do
+              fetch "$tag" && { echo "from $tag"; break; }
+            done
+          fi
+          tar xzf fw.tgz
           FW=firmware.bin.hi3516cv6xx
-          # FIT: image 1 = linux_kernel (zImage), image 0 = fdt-1 (dtb).
-          dumpimage -T flat_dt -p 1 -o uImage.hi3516cv610 "$FW"
-          dumpimage -T flat_dt -p 0 -o cv610.dtb          "$FW"
-          # SquashFS rootfs is appended right after the FIT.
+          if [ "$(od -An -tx1 -N4 "$FW" | tr -d ' \n')" = 27051956 ]; then
+            # Split image: the uImage (64-byte header + data, size big-endian
+            # at byte 12), its DTB appended to the zImage inside, so no -dtb.
+            set -- $(od -An -tu1 -j12 -N4 "$FW")
+            head -c $(( 64 + (($1 << 24) | ($2 << 16) | ($3 << 8) | $4) )) "$FW" > uImage.hi3516cv610
+          else
+            # FIT: image 1 = linux_kernel (zImage), image 0 = fdt-1 (dtb).
+            dumpimage -T flat_dt -p 1 -o uImage.hi3516cv610 "$FW"
+            dumpimage -T flat_dt -p 0 -o cv610.dtb          "$FW"
+          fi
+          # SquashFS rootfs is appended right after the kernel.
           sqoff=$(grep -aboP 'hsqs' "$FW" | head -1 | cut -d: -f1)
           dd if="$FW" of=rootfs.squashfs.hi3516cv610 bs=64k iflag=skip_bytes \
               skip="$sqoff" status=none
-          ls -la uImage.hi3516cv610 cv610.dtb rootfs.squashfs.hi3516cv610
+          ls -la uImage.hi3516cv610 rootfs.squashfs.hi3516cv610 cv610.dtb 2>/dev/null || true
 
       - name: "OpenIPC kernel + rootfs boot"
         timeout-minutes: 4
@@ -816,7 +1233,7 @@ jobs:
           QEMU=./qemu-src/build/qemu-system-arm
           timeout 150 $QEMU -M hi3516cv610 -m 256M \
             -kernel qemu-boot/uImage.hi3516cv610 \
-            -dtb qemu-boot/cv610.dtb \
+            $( [ -f qemu-boot/cv610.dtb ] && echo -dtb qemu-boot/cv610.dtb ) \
             -initrd qemu-boot/rootfs.squashfs.hi3516cv610 \
             -nographic -serial mon:stdio -nic user,restrict=on \
             -append 'mem=128M console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs' \
@@ -871,9 +1288,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libfdt1 libglib2.0-0 libpixman-1-0 libslirp0 \
-            mtd-utils squashfs-tools python3-pip
-          pip3 install --break-system-packages ubi_reader
+            libfdt1 libglib2.0-0 libpixman-1-0 libslirp0
 
       - name: Download QEMU binary
         uses: actions/download-artifact@v4
@@ -891,17 +1306,16 @@ jobs:
         timeout-minutes: 4
         run: |
           # Boots ENTIRELY from the emulated SPI-NAND (no -kernel): boot ROM ->
-          # U-Boot (attaches UBI, reads kernel volume) -> kernel -> ubiblock
-          # squashfs root.  nand-jedec/nand-oob-size present the W25N01GV the
-          # OpenIPC ev300 U-Boot SPI-NAND id table knows.
+          # U-Boot (attaches UBI, ubifsloads /boot/fitImage from the UBIFS
+          # rootfs) -> kernel -> UBIFS root.  nand-jedec/nand-oob-size present
+          # the W25N01GV the OpenIPC ev300 U-Boot SPI-NAND id table knows.
           #
-          # The gate is the NAND/UBI storage chain itself — U-Boot + kernel
-          # attach UBI from the emulated NAND and mount the squashfs rootfs via
-          # ubiblock — which is exactly what this PR delivers and is fully
-          # deterministic.  It deliberately does NOT wait for a login prompt:
-          # the OpenIPC "ultimate" rootfs (the only NAND build OpenIPC ships
-          # for ev300) runs load_hisilicon, which insmods the vendor MPP/mmz
-          # blob that hangs on QEMU regardless of storage backend.
+          # The gate is the NAND/UBI storage chain: root mounted as UBIFS from
+          # the emulated NAND, then init mounting rootfs_data.  On first boot
+          # rootfs_data is empty, so the kernel formats it — real erases and
+          # page programs — after which the boot partition must still be
+          # byte-identical to the U-Boot written there (an erase decoded to
+          # the wrong block used to wipe it).
           QEMU=./qemu-src/build/qemu-system-arm
           timeout 180 $QEMU -M hi3516ev300,sensor=none,flash-file=qemu-boot/ev300-nand.img \
             -global hisi-fmc.nand-jedec=0xEFAA21 \
@@ -911,30 +1325,34 @@ jobs:
           QEMU_PID=$!
 
           for i in $(seq 1 180); do
-            if grep -q "Mounted root (squashfs filesystem)" boot-output.txt 2>/dev/null; then
+            if grep -q 'name "rootfs_data"' boot-output.txt 2>/dev/null; then
               echo ""
-              echo "=== NAND -> UBI -> squashfs root mounted ==="
+              echo "=== NAND -> UBI -> UBIFS root + rootfs_data mounted ==="
               kill $QEMU_PID 2>/dev/null || true
+              sleep 1
               # The whole chain must have run, and cleanly.
-              grep -q "block ubiblock0_1: created from ubi0:1(rootfs)" boot-output.txt \
-                || { echo "FAIL: ubiblock not created from NAND UBI"; exit 1; }
-              if grep -qE "Kernel panic|Unable to mount root|spi_flash_probe\(\) failed" boot-output.txt; then
+              grep -q "Mounted root (ubifs filesystem)" boot-output.txt \
+                || { echo "FAIL: root not mounted as UBIFS from NAND"; exit 1; }
+              if grep -qE "Kernel panic|Unable to mount root|spi_flash_probe\(\) failed|UBIFS error" boot-output.txt; then
                 echo "=== FAIL: panic / NAND-boot regression ==="
-                grep -nE "Kernel panic|Unable to mount root|spi_flash_probe\(\) failed" boot-output.txt | head
+                grep -nE "Kernel panic|Unable to mount root|spi_flash_probe\(\) failed|UBIFS error" boot-output.txt | head
                 exit 1
               fi
-              echo "=== Boot clean (boot ROM -> U-Boot UBI -> kernel UBI -> ubiblock -> squashfs root) ==="
+              UB=/tmp/ev300-nand-mk/u-boot-hi3516ev300-nand.bin
+              cmp -n "$(stat -c %s "$UB")" "$UB" qemu-boot/ev300-nand.img \
+                || { echo "FAIL: U-Boot in the NAND image was overwritten during boot"; exit 1; }
+              echo "=== Boot clean (boot ROM -> U-Boot UBI -> fitImage -> UBIFS root -> rootfs_data), boot partition intact ==="
               exit 0
             fi
             if ! kill -0 $QEMU_PID 2>/dev/null; then
-              echo "=== FAIL: QEMU exited before mounting root ==="
+              echo "=== FAIL: QEMU exited before mounting rootfs_data ==="
               tail -40 boot-output.txt
               exit 1
             fi
             sleep 1
           done
 
-          echo "=== TIMEOUT: root not mounted from NAND/UBI ==="
+          echo "=== TIMEOUT: rootfs_data not mounted from NAND/UBI ==="
           tail -40 boot-output.txt
           kill $QEMU_PID 2>/dev/null || true
           exit 1

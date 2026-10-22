@@ -13,6 +13,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "hw/sysbus.h"
+#include "hw/irq.h"
 #include "hw/qdev-properties.h"
 #include "qemu/log.h"
 #include "system/runstate.h"
@@ -30,6 +31,24 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiSysctlState, HISI_SYSCTL)
 
 /* Number of 32-bit general-purpose storage words */
 #define HISI_SYSCTL_NREGS       (HISI_SYSCTL_MMIO_SIZE / 4)
+
+/*
+ * SC_CTRL bit 8: set by the mask-ROM's final handoff thunk to drop the
+ * reset-time alias of the mask-ROM at address 0 (openhisilicon
+ * bootrom/hi3516av300/re/start.S, clear_remap_start).  Cleared by reset.
+ */
+#define SC_CTRL_REMAP_CLEAR     (1 << 8)
+
+/*
+ * SC_CTRL[2:0] requests a system clock mode (2 = slow, 4 = normal) and
+ * SC_CTRL[6:3] reports the mode the clock tree is in.  There is no PLL to
+ * wait for here, so the status follows the request at once.  The V1 3.0.8
+ * kernel's tcm_slow_reset (mach-hi3518/tcm_reset.S) requests slow mode and
+ * polls the status for it before writing SC_SYSRES.
+ */
+#define SC_CTRL_MODE_CTRL_MASK      0x7
+#define SC_CTRL_MODE_STATUS_SHIFT   3
+#define SC_CTRL_MODE_STATUS_MASK    (0xf << SC_CTRL_MODE_STATUS_SHIFT)
 
 struct HisiSysctlState {
     SysBusDevice parent_obj;
@@ -53,6 +72,15 @@ struct HisiSysctlState {
     uint32_t v1_chip_id_88;
     uint32_t v1_chip_id_8c;
     uint32_t regs[HISI_SYSCTL_NREGS];
+    /*
+     * Power-on image of regs[]: whatever machine init stored (SYSSTAT boot
+     * straps, per-SoC preset words), captured at the first system reset,
+     * which runs after machine init and before the guest.  Later resets
+     * restore it, discarding every word the guest wrote.
+     */
+    uint32_t por_regs[HISI_SYSCTL_NREGS];
+    bool por_valid;
+    qemu_irq remap_clear;       /* SC_CTRL bit 8 level */
 };
 
 static uint64_t hisi_sysctl_read(void *opaque, hwaddr offset, unsigned size)
@@ -61,7 +89,9 @@ static uint64_t hisi_sysctl_read(void *opaque, hwaddr offset, unsigned size)
 
     switch (offset) {
     case 0x00: /* SC_CTRL */
-        return s->regs[0];
+        return (s->regs[0] & ~SC_CTRL_MODE_STATUS_MASK) |
+               ((s->regs[0] & SC_CTRL_MODE_CTRL_MASK)
+                << SC_CTRL_MODE_STATUS_SHIFT);
     case 0x04: /* SC_SYSRES — system reset (write-only, read returns 0) */
         return 0;
     case 0x88: /* V1 chip ID register (read-only, write-ignored) */
@@ -118,6 +148,10 @@ static void hisi_sysctl_write(void *opaque, hwaddr offset,
                       (uint32_t)val);
         qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
         break;
+    case 0x00: /* SC_CTRL */
+        s->regs[0] = (uint32_t)val;
+        qemu_set_irq(s->remap_clear, !!(val & SC_CTRL_REMAP_CLEAR));
+        break;
     case 0x88: /* V1 chip ID register — read-only, drop writes */
         break;
     default:
@@ -143,6 +177,29 @@ static void hisi_sysctl_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &hisi_sysctl_ops, s,
                           TYPE_HISI_SYSCTL, HISI_SYSCTL_MMIO_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->remap_clear, "remap-clear", 1);
+}
+
+static void hisi_sysctl_reset(DeviceState *dev)
+{
+    HisiSysctlState *s = HISI_SYSCTL(dev);
+
+    /*
+     * SC_SYSRES is a whole-chip reset: every word returns to its power-on
+     * value, not just the boot remap.  The vendor 4.9 GIC driver depends
+     * on that: it stamps 0x47444946 ("GDIF") at +0x130 after initialising
+     * the distributor and skips gic_dist_init() when the stamp is already
+     * there, so a stamp that survived the reset leaves the freshly reset
+     * GIC disabled and the rebooted kernel without a timer interrupt.
+     * Whoever consumes "remap-clear" restores its own reset state.
+     */
+    if (!s->por_valid) {
+        memcpy(s->por_regs, s->regs, sizeof(s->por_regs));
+        s->por_valid = true;
+    } else {
+        memcpy(s->regs, s->por_regs, sizeof(s->regs));
+    }
+    s->regs[0] &= ~SC_CTRL_REMAP_CLEAR;
 }
 
 static const Property hisi_sysctl_properties[] = {
@@ -157,6 +214,7 @@ static void hisi_sysctl_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     device_class_set_props(dc, hisi_sysctl_properties);
+    device_class_set_legacy_reset(dc, hisi_sysctl_reset);
 }
 
 static const TypeInfo hisi_sysctl_info = {
