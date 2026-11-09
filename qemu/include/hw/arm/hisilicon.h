@@ -234,6 +234,10 @@ typedef struct HisiSoCConfig {
     int             num_sdhci;
     hwaddr          sdhci_bases[HISI_MAX_SDHCI];
     int             sdhci_irqs[HISI_MAX_SDHCI];
+    /* PRNSTS bit 19 the other way round from the SDHCI spec, set when the
+     * kernel's driver carries SDHCI_QUIRK_INVERTED_WRITE_PROTECT: without it
+     * a writable card reads back as write-protected and mounts read-only. */
+    bool            sdhci_wp_inverted;
 
     /* I2C (HiBVT for V2+, register-poll "hisi-i2c-v1" for CV100 family) */
     int             num_i2c;
@@ -258,6 +262,12 @@ typedef struct HisiSoCConfig {
     hwaddr          jpge_base;
     int             vedu_irq;
     int             jpge_irq;
+    hwaddr          vpss_base;         /* 0 = none; online-mode frame source */
+    int             vpss_irq;
+    hwaddr          vi_cap_base;       /* 0 = none; VI as the frame clock */
+    hwaddr          vi_proc_base;
+    int             vi_cap_irq;
+    int             vi_proc_irq;
 
     /* Watchdog (SP805 / cmsdk-apb-watchdog) */
     hwaddr          wdt_base;       /* 0 = no watchdog */
@@ -290,6 +300,11 @@ typedef struct HisiSoCConfig {
     int             xhci_irq;
     int             xhci_slots;     /* 0 = default 4 */
     int             xhci_intrs;     /* 0 = default 1 */
+    /* The xHCI sits in a DWC3 core the kernel probes with "snps,dwc3"
+     * (dwc3/core.c), not as a bare generic-xhci: it reads the core's ID
+     * and hardware parameters past the xHCI window and soft-resets it
+     * first.  The "hisi-usb3" regbank over the window then answers them. */
+    bool            xhci_dwc3_core;
 
     /* HiSilicon HIL2V200 L2 cache controller — used by Hi3520D family
      * (CONFIG_CACHE_HIL2V200).  Vendor 3.0.x driver hangs in early init
@@ -337,11 +352,6 @@ typedef struct HisiSoCConfig {
     /* VI frame producer — periodic VI/VPSS IRQ pulses to wake the
      * vendor MPP pipeline so VENC stops timing out.  MVP scaffolding,
      * wired only on hi3516ev300 for now. */
-    hwaddr          vi_fp_base;        /* 0 = no frame producer */
-    int             vi_fp_cap_irq;     /* GIC SPI for VI_CAP0 */
-    int             vi_fp_proc_irq;    /* GIC SPI for VI_PROC0 */
-    int             vi_fp_vpss_irq;    /* GIC SPI for VPSS */
-    int             vi_fp_vedu_irq;    /* GIC SPI for VEDU */
 
     /* CPU soft-reset register offset in CRG (for SMP bringup) */
     uint32_t        cpu_srst_offset; /* 0 = disabled, e.g. 0x78 for CV500 */

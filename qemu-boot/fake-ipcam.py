@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 A fake IP camera for emulated NVRs: ONVIF (Profile S subset) + RTSP with
-RTP interleaved over TCP, serving a synthetic H.264 test pattern.
+RTP interleaved over TCP, serving a synthetic H.264 test pattern, or
+H.264 / H.265 files.
 
 The H.264 stream needs no encoder library.  Every picture is lossless:
 the IDR codes each macroblock as I_PCM, and the P pictures that follow
@@ -9,6 +10,10 @@ code the macroblocks that changed as I_PCM and skip the rest (P_Skip with
 every motion vector zero, deblocking off), so what the NVR decodes is
 exactly the pattern drawn here: colour bars, a moving box and a frame
 counter.
+
+ONVIF offers two profiles, the main stream (Profile_1) and the sub
+stream (Profile_2), and GetSnapshotUri's /snapshot.jpg is the main
+stream's current picture as a baseline JPEG, encoded here too.
 
 Usage (the NVR at 192.168.1.9, the camera at 192.168.1.10):
 
@@ -24,6 +29,10 @@ the local port) per guest connection.
 
     python3 qemu-boot/fake-ipcam.py --write out.h264 --frames 50
 
+--file / --sub-file loop raw Annex B files instead, H.265 when they end
+in .hevc / .h265 (e.g. from kvazaar; see docs/novatek.md for what the
+NT98332 needs of them).
+
 Copyright (c) 2026 OpenIPC.
 SPDX-License-Identifier: GPL-2.0-or-later
 """
@@ -31,6 +40,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 import argparse
 import base64
 import datetime
+import math
 import os
 import random
 import select
@@ -276,6 +286,7 @@ class H264Pattern:
     def picture(self):
         """The next access unit (bytes) and whether it is an IDR."""
         planes = self.draw(self.n)
+        self.last = planes                      # for the snapshot
         idr = self.n % self.gop == 0 or self.prev is None
         b = BitWriter()
         b.ue(0)                                 # first_mb_in_slice
@@ -428,6 +439,58 @@ class H264File:
         return b"".join(b"\x00\x00\x00\x01" + x for x in au), idr
 
 
+class H265File(H264File):
+    """Replay a raw H.265 stream (Annex B), looping, starting at an IRAP."""
+
+    hevc = True
+
+    def __init__(self, path, width, height, fps):
+        data = open(path, "rb").read()
+        self.w, self.h, self.fps, self.gop = width, height, fps, 0
+        self.aus = []
+        self.ps = {}
+        au, vcl = [], False
+        for n in split_nals(data):
+            if len(n) < 3:
+                continue
+            t = (n[0] >> 1) & 0x3F
+            first = t < 32 and n[2] & 0x80
+            # a new access unit: a VPS/SPS/PPS/AUD/prefix SEI, or a
+            # picture's first slice, after the previous picture's slices
+            if vcl and (t in (32, 33, 34, 35, 39) or first):
+                self.aus.append(au)
+                au, vcl = [], False
+            if t in (32, 33, 34):
+                self.ps.setdefault(t, n)
+            au.append(n)
+            vcl |= t < 32
+        if vcl:
+            self.aus.append(au)
+        iraps = [i for i, a in enumerate(self.aus) if self.irap(a)]
+        if not iraps or len(self.ps) < 3:
+            raise SystemExit("%s: no VPS/SPS/PPS/IRAP in it" % path)
+        self.aus = self.aus[iraps[0]:]
+        self.n = 0
+
+    @staticmethod
+    def irap(au):
+        return any(16 <= (x[0] >> 1) & 0x3F <= 23 for x in au)
+
+    def vps(self):
+        return b"\x00\x00\x00\x01" + self.ps[32]
+
+    def sps(self):
+        return b"\x00\x00\x00\x01" + self.ps[33]
+
+    def pps(self):
+        return b"\x00\x00\x00\x01" + self.ps[34]
+
+    def picture(self):
+        au = self.aus[self.n % len(self.aus)]
+        self.n += 1
+        return b"".join(b"\x00\x00\x00\x01" + x for x in au), self.irap(au)
+
+
 class Stream:
     """One shared encoder; clients read the latest access units."""
 
@@ -438,6 +501,8 @@ class Stream:
         self.seq = 0
         self.sps, self.pps = split_nals(pattern.sps())[0], \
             split_nals(pattern.pps())[0]
+        self.hevc = getattr(pattern, "hevc", False)
+        self.vps = split_nals(pattern.vps())[0] if self.hevc else None
         threading.Thread(target=self.run, daemon=True).start()
 
     def run(self):
@@ -459,21 +524,26 @@ class Stream:
             return self.au
 
 
-def rtp_packets(nalu, seq, ts, ssrc, marker_last, mtu=1400):
+def rtp_packets(nalu, seq, ts, ssrc, marker_last, mtu=1400, hevc=False):
     hdr = lambda m, s: struct.pack(">BBHII", 0x80, (m << 7) | 96, s & 0xFFFF,
                                    ts & 0xFFFFFFFF, ssrc)
     if len(nalu) <= mtu:
         return [hdr(marker_last, seq) + nalu], seq + 1
     out = []
-    ind = (nalu[0] & 0xE0) | 28
-    typ = nalu[0] & 0x1F
-    body = nalu[1:]
+    if hevc:                        # RFC 7798 fragmentation unit, type 49
+        ind = bytes([(nalu[0] & 0x81) | (49 << 1), nalu[1]])
+        typ = (nalu[0] >> 1) & 0x3F
+        body = nalu[2:]
+    else:
+        ind = bytes([(nalu[0] & 0xE0) | 28])
+        typ = nalu[0] & 0x1F
+        body = nalu[1:]
     first = True
     while body:
         chunk, body = body[:mtu], body[mtu:]
         fu = typ | (0x80 if first else 0) | (0x40 if not body else 0)
         m = marker_last if not body else 0
-        out.append(hdr(m, seq) + bytes([ind, fu]) + chunk)
+        out.append(hdr(m, seq) + ind + bytes([fu]) + chunk)
         seq += 1
         first = False
     return out, seq
@@ -519,24 +589,29 @@ class RTSPHandler(socketserver.StreamRequestHandler):
         """The sub stream for URLs that ask for it, as cameras name it."""
         path = url.lower()
         sub = any(k in path for k in ("sub", "stream2", "subtype=1",
-                                      "channel=2", "/102", "/12"))
+                                      "channel=2", "/102", "/12",
+                                      "stream=1"))
         self.stream = self.server.streams["sub" if sub else "main"]
 
     def sdp(self):
         st = self.stream
-        sprop = "%s,%s" % (base64.b64encode(st.sps).decode(),
-                           base64.b64encode(st.pps).decode())
-        plid = st.sps[1:4].hex()
+        b64 = lambda n: base64.b64encode(n).decode()
+        if st.hevc:
+            fmt = ("a=rtpmap:96 H265/90000\r\n"
+                   "a=fmtp:96 sprop-vps=%s;sprop-sps=%s;sprop-pps=%s\r\n"
+                   % (b64(st.vps), b64(st.sps), b64(st.pps)))
+        else:
+            fmt = ("a=rtpmap:96 H264/90000\r\n"
+                   "a=fmtp:96 packetization-mode=1;profile-level-id=%s;"
+                   "sprop-parameter-sets=%s,%s\r\n"
+                   % (st.sps[1:4].hex(), b64(st.sps), b64(st.pps)))
         ip = self.server.advertise
         return ("v=0\r\no=- 0 0 IN IP4 %s\r\ns=fake-ipcam\r\n"
                 "c=IN IP4 0.0.0.0\r\nt=0 0\r\na=control:*\r\n"
                 "a=range:npt=0-\r\n"
-                "m=video 0 RTP/AVP 96\r\na=recvonly\r\n"
-                "a=rtpmap:96 H264/90000\r\n"
-                "a=fmtp:96 packetization-mode=1;profile-level-id=%s;"
-                "sprop-parameter-sets=%s\r\n"
+                "m=video 0 RTP/AVP 96\r\na=recvonly\r\n%s"
                 "a=framerate:%d\r\na=control:track1\r\n"
-                % (ip, plid, sprop, st.pat.fps)).encode()
+                % (ip, fmt, st.pat.fps)).encode()
 
     def handle(self):
         while True:
@@ -645,7 +720,8 @@ class RTSPHandler(socketserver.StreamRequestHandler):
                 nals = split_nals(au)
                 for i, n in enumerate(nals):
                     pkts, seq = rtp_packets(n, seq, ts, ssrc,
-                                            i == len(nals) - 1)
+                                            i == len(nals) - 1,
+                                            hevc=st.hevc)
                     for p in pkts:
                         packets += 1
                         octets += len(p) - 12
@@ -679,13 +755,19 @@ def envelope(body):
             '<s:Body>%s</s:Body></s:Envelope>' % (NS, body)).encode()
 
 
-def onvif_body(action, srv):
+def onvif_body(action, srv, body=b""):
+    """The response to an ONVIF action.  Profile_1 is the main stream,
+    Profile_2 the sub stream (NVRs live-view their split screens from it);
+    a request naming Profile_2 or VideoEncoder_2 gets the sub stream's."""
     ip, port = srv.advertise, srv.advertise_http
-    w, h, fps = srv.stream.pat.w, srv.stream.pat.h, srv.stream.pat.fps
+    sub = b"Profile_2" in body or b"VideoEncoder_2" in body
+    pat = srv.streams["sub" if sub else "main"].pat
+    w, h, fps = pat.w, pat.h, pat.fps
     dev = "http://%s:%d/onvif/device_service" % (ip, port)
     med = "http://%s:%d/onvif/media_service" % (ip, port)
     now = datetime.datetime.now(datetime.timezone.utc)
-    venc = ('<tt:Name>VideoEncoder_1</tt:Name><tt:UseCount>1</tt:UseCount>'
+    def encoder(n, w, h):
+        return ('<tt:Name>VideoEncoder_%d</tt:Name><tt:UseCount>1</tt:UseCount>'
             '<tt:Encoding>H264</tt:Encoding><tt:Resolution><tt:Width>%d'
             '</tt:Width><tt:Height>%d</tt:Height></tt:Resolution>'
             '<tt:Quality>5</tt:Quality><tt:RateControl><tt:FrameRateLimit>%d'
@@ -697,16 +779,24 @@ def onvif_body(action, srv):
             '</tt:Address><tt:Port>0</tt:Port><tt:TTL>0</tt:TTL>'
             '<tt:AutoStart>false</tt:AutoStart></tt:Multicast>'
             '<tt:SessionTimeout>PT60S</tt:SessionTimeout>'
-            % (w, h, fps, srv.stream.pat.gop))
+            % (n, w, h, fps, pat.gop))
+
+    venc = encoder(2 if sub else 1, w, h)
     vsrc = ('<tt:Name>VideoSource_1</tt:Name><tt:UseCount>1</tt:UseCount>'
             '<tt:SourceToken>VideoSource_1</tt:SourceToken><tt:Bounds x="0" '
             'y="0" width="%d" height="%d"/>' % (w, h))
-    profile = ('<trt:Profiles token="Profile_1" fixed="true"><tt:Name>'
-               'mainStream</tt:Name><tt:VideoSourceConfiguration '
-               'token="VideoSourceConfig_1">%s</tt:VideoSourceConfiguration>'
-               '<tt:VideoEncoderConfiguration token="VideoEncoder_1">%s'
-               '</tt:VideoEncoderConfiguration></trt:Profiles>'
-               % (vsrc, venc))
+    def profile(n, name, p):
+        return ('<trt:Profiles token="Profile_%d" fixed="true"><tt:Name>'
+                '%s</tt:Name><tt:VideoSourceConfiguration '
+                'token="VideoSourceConfig_1">%s</tt:VideoSourceConfiguration>'
+                '<tt:VideoEncoderConfiguration token="VideoEncoder_%d">%s'
+                '</tt:VideoEncoderConfiguration></trt:Profiles>'
+                % (n, name, vsrc, n, encoder(n, p.w, p.h)))
+
+    profiles = (profile(1, "mainStream", srv.streams["main"].pat) +
+                profile(2, "subStream", srv.streams["sub"].pat))
+    one = profile(2, "subStream", pat) if sub else \
+        profile(1, "mainStream", pat)
     bodies = {
         "GetSystemDateAndTime":
             '<tds:GetSystemDateAndTimeResponse><tds:SystemDateAndTime>'
@@ -756,9 +846,9 @@ def onvif_body(action, srv):
             '</tt:DHCP></tt:Config></tt:IPv4></tds:NetworkInterfaces>'
             '</tds:GetNetworkInterfacesResponse>' % ip,
         "GetProfiles": '<trt:GetProfilesResponse>%s</trt:GetProfilesResponse>'
-            % profile,
+            % profiles,
         "GetProfile": '<trt:GetProfileResponse>%s</trt:GetProfileResponse>'
-            % profile.replace("trt:Profiles", "trt:Profile"),
+            % one.replace("trt:Profiles", "trt:Profile"),
         "GetVideoSources":
             '<trt:GetVideoSourcesResponse><trt:VideoSources '
             'token="VideoSource_1"><tt:Framerate>%d</tt:Framerate>'
@@ -771,19 +861,23 @@ def onvif_body(action, srv):
             '</trt:GetVideoSourceConfigurationsResponse>' % vsrc,
         "GetVideoEncoderConfigurations":
             '<trt:GetVideoEncoderConfigurationsResponse><trt:Configurations '
-            'token="VideoEncoder_1">%s</trt:Configurations>'
-            '</trt:GetVideoEncoderConfigurationsResponse>' % venc,
+            'token="VideoEncoder_1">%s</trt:Configurations><trt:Configurations '
+            'token="VideoEncoder_2">%s</trt:Configurations>'
+            '</trt:GetVideoEncoderConfigurationsResponse>'
+            % (encoder(1, srv.streams["main"].pat.w, srv.streams["main"].pat.h),
+               encoder(2, srv.streams["sub"].pat.w, srv.streams["sub"].pat.h)),
         "GetVideoEncoderConfiguration":
             '<trt:GetVideoEncoderConfigurationResponse><trt:Configuration '
-            'token="VideoEncoder_1">%s</trt:Configuration>'
-            '</trt:GetVideoEncoderConfigurationResponse>' % venc,
+            'token="VideoEncoder_%d">%s</trt:Configuration>'
+            '</trt:GetVideoEncoderConfigurationResponse>'
+            % (2 if sub else 1, venc),
         "GetStreamUri":
             '<trt:GetStreamUriResponse><trt:MediaUri><tt:Uri>'
-            'rtsp://%s:%d/stream1</tt:Uri><tt:InvalidAfterConnect>false'
+            'rtsp://%s:%d/%s</tt:Uri><tt:InvalidAfterConnect>false'
             '</tt:InvalidAfterConnect><tt:InvalidAfterReboot>false'
             '</tt:InvalidAfterReboot><tt:Timeout>PT0S</tt:Timeout>'
             '</trt:MediaUri></trt:GetStreamUriResponse>'
-            % (ip, srv.advertise_rtsp),
+            % (ip, srv.advertise_rtsp, "sub" if sub else "stream1"),
         "GetSnapshotUri":
             '<trt:GetSnapshotUriResponse><trt:MediaUri><tt:Uri>'
             'http://%s:%d/snapshot.jpg</tt:Uri></trt:MediaUri>'
@@ -794,6 +888,25 @@ def onvif_body(action, srv):
         "SetSystemDateAndTime": '<tds:SetSystemDateAndTimeResponse/>',
         "SetVideoEncoderConfiguration":
             '<trt:SetVideoEncoderConfigurationResponse/>',
+        "GetVideoEncoderConfigurationOptions":
+            '<trt:GetVideoEncoderConfigurationOptionsResponse><trt:Options>'
+            '<tt:QualityRange><tt:Min>1</tt:Min><tt:Max>6</tt:Max>'
+            '</tt:QualityRange><tt:H264><tt:ResolutionsAvailable><tt:Width>%d'
+            '</tt:Width><tt:Height>%d</tt:Height></tt:ResolutionsAvailable>'
+            '<tt:GovLengthRange><tt:Min>1</tt:Min><tt:Max>%d</tt:Max>'
+            '</tt:GovLengthRange><tt:FrameRateRange><tt:Min>1</tt:Min>'
+            '<tt:Max>%d</tt:Max></tt:FrameRateRange><tt:EncodingIntervalRange>'
+            '<tt:Min>1</tt:Min><tt:Max>1</tt:Max></tt:EncodingIntervalRange>'
+            '<tt:H264ProfilesSupported>Baseline</tt:H264ProfilesSupported>'
+            '</tt:H264></trt:Options></trt:GetVideoEncoderConfigurationOptionsResponse>'
+            % (w, h, max(1, pat.gop), fps),
+        "GetNetworkProtocols":
+            '<tds:GetNetworkProtocolsResponse><tds:NetworkProtocols><tt:Name>'
+            'HTTP</tt:Name><tt:Enabled>true</tt:Enabled><tt:Port>%d'
+            '</tt:Port></tds:NetworkProtocols><tds:NetworkProtocols><tt:Name>'
+            'RTSP</tt:Name><tt:Enabled>true</tt:Enabled><tt:Port>%d'
+            '</tt:Port></tds:NetworkProtocols></tds:GetNetworkProtocolsResponse>'
+            % (port, srv.advertise_rtsp),
         "GetHostname":
             '<tds:GetHostnameResponse><tds:HostnameInformation><tt:FromDHCP>'
             'false</tt:FromDHCP><tt:Name>fake-ipcam</tt:Name>'
@@ -819,6 +932,21 @@ def soap_action(body):
 
 
 class HTTPHandler(socketserver.StreamRequestHandler):
+    def snapshot(self):
+        """The main stream's current picture as a JPEG (the pattern only:
+        a file stream has no pictures to give)."""
+        pat = self.server.streams["main"].pat
+        planes = getattr(pat, "last", None)
+        if planes:
+            code, ctype = "200 OK", "image/jpeg"
+            data = jpeg_encode(pat.w, pat.h, *planes, pat.mbw * 16)
+        else:
+            code, ctype, data = "404 Not Found", "text/plain", b"no picture"
+        log("http: GET /snapshot.jpg -> %s, %d bytes" % (code, len(data)))
+        self.wfile.write(("HTTP/1.1 %s\r\nContent-Type: %s\r\n"
+                          "Content-Length: %d\r\n\r\n"
+                          % (code, ctype, len(data))).encode() + data)
+
     def handle(self):
         while True:
             line = self.rfile.readline()
@@ -835,8 +963,13 @@ class HTTPHandler(socketserver.StreamRequestHandler):
                 k, _, v = h.partition(":")
                 hdrs[k.strip().lower()] = v.strip()
             body = self.rfile.read(int(hdrs.get("content-length", "0")))
+            if req.split(" ")[:2] == ["GET", "/snapshot.jpg"]:
+                self.snapshot()
+                if hdrs.get("connection", "").lower() == "close":
+                    return
+                continue
             action = soap_action(body)
-            resp = onvif_body(action, self.server) if action else None
+            resp = onvif_body(action, self.server, body) if action else None
             log("onvif: %s %s -> %s" % (req, action,
                                         "ok" if resp else "fault"))
             if resp:
@@ -854,6 +987,129 @@ class HTTPHandler(socketserver.StreamRequestHandler):
                              + data)
             if hdrs.get("connection", "").lower() == "close":
                 return
+
+
+# ---------------------------------------------------------------------------
+# JPEG, for the ONVIF snapshot (GetSnapshotUri)
+
+# ITU T.81 Annex K: the typical Huffman tables (code counts by length, then
+# the symbols)
+JPEG_DC_L = ([0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0], range(12))
+JPEG_DC_C = ([0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0], range(12))
+JPEG_AC_L = ([0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7D], bytes.fromhex(
+    "01020300041105122131410613516107227114328191a1082342b1c11552d1f0"
+    "2433627282090a161718191a25262728292a3435363738393a434445464748494a"
+    "535455565758595a636465666768696a737475767778797a838485868788898a"
+    "92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6"
+    "c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9fa"))
+JPEG_AC_C = ([0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 0x77], bytes.fromhex(
+    "000102031104052131061241510761711322328108144291a1b1c109233352f0"
+    "156272d10a162434e125f11718191a262728292a35363738393a434445464748"
+    "494a535455565758595a636465666768696a737475767778797a828384858687"
+    "88898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3"
+    "c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9fa"))
+
+
+def huff_codes(table):
+    """{symbol: (code, length)} of a (counts, symbols) table."""
+    codes, code, k, syms = {}, 0, 0, list(table[1])
+    for length, count in enumerate(table[0], 1):
+        for _ in range(count):
+            codes[syms[k]] = (code, length)
+            code += 1
+            k += 1
+        code <<= 1
+    return codes
+
+
+JPEG_COS = [[(math.sqrt(0.5) if u == 0 else 1.0) *
+             math.cos((2 * x + 1) * u * math.pi / 16) / 2 for x in range(8)]
+            for u in range(8)]
+JPEG_ZIGZAG = sorted(range(64), key=lambda i: (
+    i // 8 + i % 8, (i % 8) if (i // 8 + i % 8) & 1 == 0 else i // 8))
+
+
+def jpeg_encode(w, h, y, u, v, stride):
+    """Baseline 4:2:0 JPEG of the planes (Y at stride, U / V at stride / 2,
+    padded to 16 lines), unquantised (every step 1).  A flat block -- most
+    of the pattern -- codes its DC alone; the others get the full DCT."""
+    dcl, dcc = huff_codes(JPEG_DC_L), huff_codes(JPEG_DC_C)
+    acl, acc_c = huff_codes(JPEG_AC_L), huff_codes(JPEG_AC_C)
+    out = bytearray()
+    acc = [0, 0]                                # bits, count
+
+    def put(code, n):
+        acc[0] = (acc[0] << n) | code
+        acc[1] += n
+        while acc[1] >= 8:
+            acc[1] -= 8
+            b = (acc[0] >> acc[1]) & 0xFF
+            out.append(b)
+            if b == 0xFF:
+                out.append(0)                   # byte stuffing
+
+    def coef(val, codes, run=None):
+        cat = abs(val).bit_length()
+        put(*codes[cat if run is None else (run << 4) | cat])
+        if cat:
+            put(val if val > 0 else val + (1 << cat) - 1, cat)
+
+    def block(plane, pstride, x0, y0, pred, dc, ac):
+        rows = [plane[r * pstride + x0:r * pstride + x0 + 8]
+                for r in range(y0, y0 + 8)]
+        first = rows[0][0]
+        if all(p == first for row in rows for p in row):
+            val = (first - 128) * 8             # the FDCT's DC, step 1
+            coef(val - pred, dc)
+            put(*ac[0])                         # EOB
+            return val
+        f = [[p - 128 for p in row] for row in rows]
+        t = [[sum(JPEG_COS[k][x] * f[r][x] for x in range(8))
+              for k in range(8)] for r in range(8)]
+        F = [round(sum(JPEG_COS[k][r] * t[r][j] for r in range(8)))
+             for k in range(8) for j in range(8)]
+        F = [max(-1023, min(1023, c)) for c in F]
+        coef(F[0] - pred, dc)
+        run = 0
+        for i in JPEG_ZIGZAG[1:]:
+            if F[i] == 0:
+                run += 1
+                continue
+            while run > 15:
+                put(*ac[0xF0])                  # ZRL
+                run -= 16
+            coef(F[i], ac, run)
+            run = 0
+        if run:
+            put(*ac[0])
+        return F[0]
+
+    cs = stride // 2
+    py = pu = pv = 0
+    for my in range(0, (h + 15) // 16 * 16, 16):
+        for mx in range(0, (w + 15) // 16 * 16, 16):
+            for by, bx in ((0, 0), (0, 8), (8, 0), (8, 8)):
+                py = block(y, stride, mx + bx, my + by, py, dcl, acl)
+            pu = block(u, cs, mx // 2, my // 2, pu, dcc, acc_c)
+            pv = block(v, cs, mx // 2, my // 2, pv, dcc, acc_c)
+    if acc[1]:
+        put((1 << (8 - acc[1])) - 1, 8 - acc[1])   # pad with ones
+
+    def seg(marker, body):
+        return struct.pack(">BBH", 0xFF, marker, len(body) + 2) + body
+
+    def dht(cls_id, table):
+        return bytes([cls_id]) + bytes(table[0]) + bytes(table[1])
+
+    hdr = b"\xff\xd8"
+    hdr += seg(0xE0, b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0")
+    hdr += seg(0xDB, b"\x00" + b"\x01" * 64 + b"\x01" + b"\x01" * 64)
+    hdr += seg(0xC0, struct.pack(">BHHB", 8, h, w, 3) +
+               b"\x01\x22\x00\x02\x11\x01\x03\x11\x01")
+    hdr += seg(0xC4, dht(0x00, JPEG_DC_L) + dht(0x10, JPEG_AC_L) +
+               dht(0x01, JPEG_DC_C) + dht(0x11, JPEG_AC_C))
+    hdr += seg(0xDA, b"\x03\x01\x00\x02\x11\x03\x11\x00\x3f\x00")
+    return hdr + bytes(out) + b"\xff\xd9"
 
 
 # ---------------------------------------------------------------------------
@@ -910,7 +1166,10 @@ def main():
     ap.add_argument("--fps", type=int, default=10)
     ap.add_argument("--gop", type=int, default=20)
     ap.add_argument("--file", help="stream this raw H.264 file (looped) "
-                    "instead of the pattern; --size/--fps describe it")
+                    "instead of the pattern, H.265 if it ends in .hevc or "
+                    ".h265; --size/--fps describe it")
+    ap.add_argument("--sub-file", help="the sub stream's file, with "
+                    "--file; --sub-size describes it")
     ap.add_argument("--write", help="write an Annex B file and exit")
     ap.add_argument("--frames", type=int, default=50)
     ap.add_argument("--relay", type=int, metavar="PORT",
@@ -922,8 +1181,13 @@ def main():
         relay(ARGS.bind, ARGS.relay)
         return
     w, h = (int(x) for x in ARGS.size.split("x"))
+
+    def from_file(path, w, h):
+        hevc = path.lower().endswith((".hevc", ".h265", ".265"))
+        return (H265File if hevc else H264File)(path, w, h, ARGS.fps)
+
     if ARGS.file:
-        pat = H264File(ARGS.file, w, h, ARGS.fps)
+        pat = from_file(ARGS.file, w, h)
     else:
         pat = H264Pattern(w, h, ARGS.fps, ARGS.gop)
 
@@ -934,7 +1198,10 @@ def main():
         return
 
     streams = {"main": Stream(pat)}
-    if ARGS.sub_size == ARGS.size or ARGS.file:
+    if ARGS.file and ARGS.sub_file:
+        sw, sh = (int(x) for x in ARGS.sub_size.split("x"))
+        streams["sub"] = Stream(from_file(ARGS.sub_file, sw, sh))
+    elif ARGS.sub_size == ARGS.size or ARGS.file:
         streams["sub"] = streams["main"]
     else:
         sw, sh = (int(x) for x in ARGS.sub_size.split("x"))

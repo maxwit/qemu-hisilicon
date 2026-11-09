@@ -24,14 +24,19 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#include "qemu/units.h"
 #include "hw/irq.h"
 #include "hw/qdev-properties.h"
 #include "hw/sysbus.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
+#include "block/thread-pool.h"
 #include "qom/object.h"
 #include "system/dma.h"
+#include "hw/misc/nvt-ai.h"
 #include "hw/misc/nvt-gfx.h"
+#include "hw/misc/nvt-md.h"
+#include "hw/misc/nvt-ive.h"
 #include "hw/misc/nvt-h26x.h"
 #include "hw/misc/nvt-pixel.h"
 
@@ -41,6 +46,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(NvtMediaState, NVT_MEDIA)
 #define NVT_MEDIA_MAX_IRQS  3
 
 typedef struct NvtMediaEngine NvtMediaEngine;
+typedef struct NvtAiWork NvtAiWork;
 
 struct NvtMediaState {
     SysBusDevice parent_obj;
@@ -51,6 +57,8 @@ struct NvtMediaState {
     char *engine_name;
     uint32_t size;
     bool trace;
+    char *ai_dump;              /* AI: a directory to dump jobs and RAM to */
+    uint32_t ai_dump_ram;       /* AI: the RAM the dump snapshots */
     const NvtMediaEngine *engine;
     QEMUTimer *timer;           /* frame / job timing, for engines that run */
     uint32_t phase;             /* where in its frame or job the engine is */
@@ -65,6 +73,23 @@ struct NvtMediaState {
      * IDR, when a new encoder takes over.
      */
     NvtH26x *h26x;
+    /*
+     * AI: the job on a worker thread, and -- migrated, so the destination
+     * runs it again -- whether one is running, the registers it started
+     * with and the list position it reached.
+     */
+    NvtAiWork *ai_work;
+    uint32_t ai_pending;
+    uint32_t ive_done;          /* IVE: jobs run, frame ends still to raise */
+    uint32_t *ai_regs;
+    uint32_t ai_res;
+    /* venc: the job a list is at, and where its report goes */
+    uint32_t venc_id;
+    uint32_t venc_dump_off;
+    uint32_t venc_dump_cnt;
+    uint32_t venc_dump_dst;
+    uint32_t venc_bslen;
+    bool venc_coding;
 };
 
 /*
@@ -241,6 +266,8 @@ typedef struct {
     uint32_t trig;              /* control bit of a single, list-less job */
     uint32_t trig_end;          /* and its status */
     uint32_t ll_err;            /* status of a broken list, 0: list end */
+    hwaddr ll_base;             /* the base bit-59 updates add, 0: none */
+    hwaddr idle;                /* reads with bit 15 set (engine idle) */
 } NvtIppParams;
 
 #define IPP_CTRL            0x00
@@ -249,6 +276,8 @@ typedef struct {
 
 #define IPP_LL_MAX_CMDS     4096
 #define IPP_CMD_UPD         4
+#define IPP_UPD_BASE        (1ull << 59)    /* AI: value + list base */
+#define IPP_UPD_FIRE        (1ull << 60)    /* AI: the job's last update */
 #define IPP_CMD_NXTUPD      2
 #define IPP_CMD_NXTLL       1
 #define IPP_CMD_NULL        0
@@ -280,6 +309,78 @@ static const NvtIppParams ipp_grph = {
     1u << 2,
 };
 
+/*
+ * The AI engines (kdrv_ai: cnn_reg.h, nue_reg.h, nue2_reg.h), in the
+ * "ai" node's order NUE, NUE2, CNN (NA51055: NUE, NUE2, CNN2, CNN1, the
+ * two CNNs alike).  Control bit 0 resets, bit 1 runs a
+ * job set up in the registers (done: status bit 0), bit 28 fires a list
+ * (job end bit 10, list end bit 8, a broken list bit 9).  Lists start at
+ * the address register; an update with bit 59 adds the list base
+ * register to its value, one with bit 60 is the job's last and fires it.
+ * Bit 15 of the DMA-disable register reads idle.
+ */
+static const NvtIppParams ipp_nue = {
+    0x038, 0x03C, 0x024, 1u << 10, 1u << 8, 1u << 0, 1u << 1, 1u << 0,
+    1u << 9, 0x1CC, 0x1AC,
+};
+static const NvtIppParams ipp_nue2 = {
+    0x03C, 0x040, 0x014, 1u << 10, 1u << 8, 1u << 0, 1u << 1, 1u << 0,
+    1u << 9, 0x09C, 0x098,
+};
+static const NvtIppParams ipp_cnn = {
+    0x008, 0x00C, 0x040, 1u << 10, 1u << 8, 1u << 0, 1u << 1, 1u << 0,
+    1u << 9, 0x204, 0x1FC,
+};
+
+/*
+ * MDBC, motion detection (kdrv_md: mdbc_reg.h): control bit 0 resets --
+ * a running job and the status go, the interrupt enables (written before
+ * it) stay -- bit 1 runs a frame (done: status bit 0, which
+ * kdrv_md waits for with no timeout), bit 28 fires a list (job end bit 7,
+ * list end bit 4, a broken list bit 5); status is write 1 to clear.  The
+ * work is nvt-md.c's.  Bit 15 of the DMA-disable register reads idle.
+ */
+static const NvtIppParams ipp_md = {
+    0x008, 0x00C, 0x030, 1u << 0 | 1u << 7, 1u << 4, 1u << 0, 1u << 1,
+    1u << 0, 1u << 5, 0, 0x110,
+};
+
+/*
+ * IVE, the intelligent video engine (kdrv_ive: ive_reg.h): control bit 0
+ * resets, bit 1 runs a job, bit 28 fires a list (job end bit 10, list
+ * end bit 8, a broken list bit 9); frame end is status bit 0, which every
+ * sample waits for with no timeout.  kdrv_ive sets bit 1 and never clears
+ * it, so a job clears it.  The work is nvt-ive.c's, done as START is
+ * written, with the registers the job started with; its frame end comes
+ * some 1 ms later, as a silicon job's would, and a second job started
+ * meanwhile gets its own, 1 ms after the first.  Bit 31 of 0x68 reads
+ * idle.
+ */
+static const NvtIppParams ipp_ive = {
+    0x004, 0x008, 0x060, 1u << 0 | 1u << 10, 1u << 8, 1u << 0, 1u << 1,
+    1u << 0, 1u << 9, 0, 0x068,
+};
+
+static bool ive_read(NvtMediaState *s, hwaddr off, uint64_t *val)
+{
+    if (off == 0x068) {
+        *val |= 1u << 31;
+        return true;
+    }
+    return false;
+}
+
+static bool ai_read(NvtMediaState *s, hwaddr off, uint64_t *val)
+{
+    const NvtIppParams *p = s->engine->opaque;
+
+    if (off == p->idle) {
+        *val |= 1u << 15;
+        return true;
+    }
+    return false;
+}
+
 static void ipp_update_irq(NvtMediaState *s)
 {
     const NvtIppParams *p = s->engine->opaque;
@@ -291,6 +392,37 @@ static uint64_t ipp_write(NvtMediaState *s, hwaddr off, uint64_t val)
 {
     const NvtIppParams *p = s->engine->opaque;
 
+    if (p == &ipp_md && (off == 0x060 || off == 0x074 || off == 0x078)) {
+        /* read-only: LUM_DIFF, FRM_ID [19:12], RND [30:16] */
+        uint32_t ro = off == 0x060 ? 0x0FFFFFFF :
+                      off == 0x074 ? 0x000FF000 : 0x7FFF0000;
+
+        return (val & ~ro) | (*reg(s, off) & ro);
+    }
+    if (off == IPP_CTRL && p == &ipp_ive && (val & 1)) {
+        /* reset: the jobs' frame ends still to come and the status go */
+        timer_del(s->timer);
+        s->ive_done = 0;
+        *reg(s, p->ints) = 0;
+        return val & ~(1u | p->trig | IPP_LL_FIRE);
+    }
+    if (off == IPP_CTRL && p == &ipp_ive && (val & p->trig)) {
+        nvt_ive_run(s->regs);
+        if (!s->ive_done++) {
+            timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                      IPP_JOB_NS);
+        }
+        return val & ~p->trig;
+    }
+    if (p == &ipp_ive && (off == 0x054 || off == 0x058)) {
+        return *reg(s, off);                /* the IRV counters */
+    }
+    if (off == IPP_CTRL && p == &ipp_md && (val & 1)) {
+        /* MDBC reset: the job and its status go, the enables stay */
+        timer_del(s->timer);
+        *reg(s, p->ints) = 0;
+        return val & ~(1u | p->trig | IPP_LL_FIRE);
+    }
     if (off == IPP_CTRL) {
         if (val & IPP_LL_FIRE) {
             s->ll_addr = *reg(s, p->ll_addr);
@@ -316,15 +448,18 @@ static void nvt_media_write(void *opaque, hwaddr off, uint64_t val,
 typedef enum {
     IPP_LL_NEXT,                /* a job set up, another follows */
     IPP_LL_LAST,                /* the last job set up */
+    IPP_LL_END,                 /* the list ends with no job left */
     IPP_LL_BROKEN,              /* unreadable, malformed or endless */
 } IppLlResult;
 
 /* Apply one list's updates up to the end of its job. */
 static IppLlResult ipp_run_job(NvtMediaState *s)
 {
+    const NvtIppParams *p = s->engine->opaque;
     hwaddr addr = s->ll_addr;
     uint64_t cmd;
-    uint32_t off, mask, i;
+    uint32_t off, mask, i, val;
+    bool upd = false;
     int n;
 
     for (n = 0; n < IPP_LL_MAX_CMDS; n++, addr += 8) {
@@ -347,8 +482,16 @@ static IppLlResult ipp_run_job(NvtMediaState *s)
                     mask |= 0xFFu << (8 * i);
                 }
             }
-            nvt_media_write(s, off, (*reg(s, off) & ~mask) |
-                            ((uint32_t)cmd & mask), 4);
+            val = cmd;
+            if ((cmd & IPP_UPD_BASE) && p->ll_base) {
+                val += *reg(s, p->ll_base);
+            }
+            nvt_media_write(s, off, (*reg(s, off) & ~mask) | (val & mask), 4);
+            upd = true;
+            if ((cmd & IPP_UPD_FIRE) && p->ll_base) {
+                s->ll_addr = addr + 8;  /* the job's last: run it, go on */
+                return IPP_LL_NEXT;
+            }
             break;
         case IPP_CMD_NXTUPD:
             addr = ((cmd >> 8) & 0xFFFFFFFF) - 8;
@@ -357,7 +500,8 @@ static IppLlResult ipp_run_job(NvtMediaState *s)
             s->ll_addr = (cmd >> 8) & 0xFFFFFFFF;
             return IPP_LL_NEXT;
         case IPP_CMD_NULL:
-            return IPP_LL_LAST;
+            /* an AI list's jobs end in fired updates: none may be left */
+            return upd || !p->ll_base ? IPP_LL_LAST : IPP_LL_END;
         default:
             qemu_log_mask(LOG_GUEST_ERROR, "nvt-media %s: linked list "
                           "command 0x%016" PRIx64 "\n", s->engine_name, cmd);
@@ -432,6 +576,57 @@ static void ime_write_yuv(NvtMediaState *s)
 }
 
 /* A job is set up: the engines that compute do its work. */
+/*
+ * A debugging aid for the AI engines (-global nvt-media.ai-dump=DIR):
+ * each job's registers, in the order the jobs run, appended to DIR/jobs.bin
+ * as records of "AIJB", the engine (0 NUE, 1 NUE2, 2 CNN), a sequence
+ * number and the register count, then the registers, all 32-bit LE; and
+ * snapshots of the guest's RAM at the first CNN job, DIR/ram.bin, at the
+ * first NUE job, DIR/ram-nue.bin, and at each NUE softmax, DIR/ram-smN.bin
+ * (N its sequence number).
+ */
+static void ai_dump_job(NvtMediaState *s, uint32_t engine)
+{
+    static uint32_t next_seq;
+    static bool ram_done[3];
+    uint32_t seq = next_seq++;
+    g_autofree char *path = g_build_filename(s->ai_dump, "jobs.bin", NULL);
+    uint32_t hdr[4] = {
+        cpu_to_le32(0x424a4941), cpu_to_le32(engine), cpu_to_le32(seq),
+        cpu_to_le32(s->size / 4),
+    };
+    FILE *f;
+    uint32_t i, v;
+
+    bool softmax = engine == 0 && (s->regs[1] & 7) == 6;
+
+    if ((engine != 1 && !ram_done[engine]) || softmax) {
+        g_autofree char *name = softmax ? g_strdup_printf("ram-sm%u.bin", seq) :
+                                g_strdup(engine ? "ram.bin" : "ram-nue.bin");
+        g_autofree char *rp = g_build_filename(s->ai_dump, name, NULL);
+        g_autofree uint8_t *ram = g_malloc(s->ai_dump_ram);
+
+        ram_done[engine] = true;
+        dma_memory_read(&address_space_memory, 0, ram, s->ai_dump_ram,
+                        MEMTXATTRS_UNSPECIFIED);
+        if (!g_file_set_contents(rp, (const char *)ram, s->ai_dump_ram,
+                                 NULL)) {
+            qemu_log_mask(LOG_GUEST_ERROR, "nvt-media: cannot write %s\n", rp);
+        }
+    }
+    f = fopen(path, "ab");
+    if (!f) {
+        qemu_log_mask(LOG_GUEST_ERROR, "nvt-media: cannot write %s\n", path);
+        return;
+    }
+    fwrite(hdr, sizeof(hdr), 1, f);
+    for (i = 0; i < s->size / 4; i++) {
+        v = cpu_to_le32(s->regs[i]);
+        fwrite(&v, 4, 1, f);
+    }
+    fclose(f);
+}
+
 static void ipp_job_work(NvtMediaState *s)
 {
     if (s->engine->opaque == &ipp_ime) {
@@ -440,20 +635,146 @@ static void ipp_job_work(NvtMediaState *s)
         nvt_gfx_grph_run(s->regs);
     } else if (s->engine->opaque == &ipp_ise) {
         nvt_gfx_ise_run(s->regs);
+    } else if (s->engine->opaque == &ipp_md) {
+        nvt_md_run(s->regs);
+    } else if (s->engine->opaque == &ipp_ive) {
+        nvt_ive_run(s->regs);
     }
+}
+
+/* a job's done: a single job's trigger bit drops, a list goes on */
+static void ipp_job_finish(NvtMediaState *s, bool single, IppLlResult res)
+{
+    const NvtIppParams *p = s->engine->opaque;
+
+    if (single) {
+        *reg(s, IPP_CTRL) &= ~p->trig;
+        *reg(s, p->ints) |= p->trig_end;
+        ipp_update_irq(s);
+        return;
+    }
+    *reg(s, p->ints) |= p->job_end | (res == IPP_LL_NEXT ? 0 : p->ll_end);
+    ipp_update_irq(s);
+    if (res == IPP_LL_NEXT) {
+        timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  IPP_JOB_NS);
+    }
+}
+
+/*
+ * The AI engines' jobs take up to a few hundred milliseconds of host time
+ * (a CNN layer), so they run on a worker thread with a copy of the
+ * registers.  The work logs its writes; the job is done, and its writes
+ * land, when the work comes back to the main loop.  A reset or a load
+ * detaches the work, which then comes back to nothing.
+ */
+typedef void NvtAiRun(const uint32_t *regs, NvtAiWrites *w);
+
+struct NvtAiWork {
+    NvtMediaState *s;           /* NULL once detached */
+    NvtAiRun *run;
+    NvtAiWrites *wl;
+    bool single;
+    IppLlResult res;
+    uint32_t regs[];
+};
+
+static NvtAiRun *ai_engine_run(NvtMediaState *s)
+{
+    if (s->engine->opaque == &ipp_nue) {
+        return nvt_ai_nue_run;
+    } else if (s->engine->opaque == &ipp_nue2) {
+        return nvt_ai_nue2_run;
+    } else if (s->engine->opaque == &ipp_cnn) {
+        return nvt_ai_cnn_run;
+    }
+    return NULL;
+}
+
+static int ai_work_run(void *opaque)
+{
+    NvtAiWork *wk = opaque;
+
+    wk->run(wk->regs, wk->wl);
+    return 0;
+}
+
+static void ai_work_done(void *opaque, int ret)
+{
+    NvtAiWork *wk = opaque;
+    NvtMediaState *s = wk->s;
+
+    if (s) {
+        s->ai_work = NULL;
+        s->ai_pending = 0;
+        nvt_ai_writes_commit(wk->wl);
+        ipp_job_finish(s, wk->single, wk->res);
+    }
+    nvt_ai_writes_free(wk->wl);
+    g_free(wk);
+}
+
+static void ai_job_detach(NvtMediaState *s)
+{
+    if (s->ai_work) {
+        s->ai_work->s = NULL;
+        s->ai_work = NULL;
+    }
+}
+
+/* the job the registers in ai_regs describe */
+static void ai_job_start(NvtMediaState *s, bool single, IppLlResult res)
+{
+    NvtAiWork *wk = g_malloc0(sizeof(*wk) + s->size);
+
+    if (s->ai_dump) {
+        ai_dump_job(s, s->engine->opaque == &ipp_nue ? 0 :
+                       s->engine->opaque == &ipp_nue2 ? 1 : 2);
+    }
+    wk->s = s;
+    wk->run = ai_engine_run(s);
+    wk->wl = nvt_ai_writes_new();
+    wk->single = single;
+    wk->res = res;
+    memcpy(wk->regs, s->ai_regs, s->size);
+    s->ai_work = wk;
+    s->ai_pending = 1;
+    s->ai_res = res;
+    thread_pool_submit_aio(ai_work_run, wk, ai_work_done, wk);
 }
 
 static void ipp_job_done(NvtMediaState *s)
 {
     const NvtIppParams *p = s->engine->opaque;
+    bool ai = ai_engine_run(s);
     IppLlResult res;
 
-    if (s->phase) {
-        /* a single job: its trigger bit drops when it is done */
-        ipp_job_work(s);
-        *reg(s, IPP_CTRL) &= ~p->trig;
+    if (p == &ipp_ive && s->ive_done) {
+        /* a job already run: its frame end, then the next one's */
         *reg(s, p->ints) |= p->trig_end;
         ipp_update_irq(s);
+        if (--s->ive_done) {
+            timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                      IPP_JOB_NS);
+        }
+        return;
+    }
+
+    if (ai && s->ai_work) {
+        /* started again while a job is on the worker: once it is back */
+        timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  IPP_JOB_NS);
+        return;
+    }
+    if (s->phase) {
+        /* a single job: its trigger bit drops when it is done */
+        if (ai) {
+            memcpy(s->ai_regs, s->regs, s->size);
+            ai_job_start(s, true, IPP_LL_LAST);
+            return;
+        }
+        ipp_job_work(s);
+        ipp_job_finish(s, true, IPP_LL_LAST);
         return;
     }
     res = ipp_run_job(s);
@@ -463,14 +784,18 @@ static void ipp_job_done(NvtMediaState *s)
         ipp_update_irq(s);
         return;
     }
-    ipp_job_work(s);
-
-    *reg(s, p->ints) |= p->job_end | (res == IPP_LL_NEXT ? 0 : p->ll_end);
-    ipp_update_irq(s);
-    if (res == IPP_LL_NEXT) {
-        timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                  IPP_JOB_NS);
+    if (res == IPP_LL_END) {
+        *reg(s, p->ints) |= p->ll_end;
+        ipp_update_irq(s);
+        return;
     }
+    if (ai) {
+        memcpy(s->ai_regs, s->regs, s->size);
+        ai_job_start(s, false, res);
+        return;
+    }
+    ipp_job_work(s);
+    ipp_job_finish(s, false, res);
 }
 
 /*
@@ -550,6 +875,201 @@ static void h26x_done(NvtMediaState *s)
 static void h26x_reset(NvtMediaState *s)
 {
     nvt_h26x_reset(s->h26x);
+}
+
+/*
+ * NA51103 / NA51090's H.26x encoder (kdrv_venc.ko, as decompiled): a later
+ * revision of the engine above.  Its picture registers are the same --
+ * the driver's image of them goes in at 0x020 (h26x_setEncDirectRegSet,
+ * h26xEnc_wrapLLCmd), so source, reconstruction, bitstream, NAL list,
+ * FUNC_CFG and size sit where nvt-h26x.c reads them -- but the rest moved:
+ *
+ *   0x000 CTRL     bit 4 software reset, bit 8 start, bit 12 busy
+ *   0x004 INT      picture finish bit 0, buffer full bit 12, reset done
+ *                  bit 28; write 1 to clear
+ *   0x010 / 0x014  the link list's address, [7:0] its job count
+ *   0x018          [15:0] the job the engine is at
+ *   0x020 INT_EN   the image's first word
+ *   0xD00 / 0xD08  debug select [15:8], and with 0 there the bitstream
+ *                  pointer: the length coded plus the DRAM burst (128
+ *                  bytes with CTRL bit 16, else 256), h26xEnc_getBsLen
+ *   0xD14          the report, NA51089's H26XREPORT order (length at +0x18)
+ *
+ * The driver runs it from link lists by default (h26x_enc_link_list 1, up
+ * to two jobs a list).  A command word is op [31:28], job id [27:20],
+ * register offset / 4 [19:8], count [7:0]:
+ *   0  a job starts
+ *   1  the next count words go to the registers from the offset
+ *   2  the count registers from the offset go to the address in the next
+ *      word -- the report, after the picture
+ *   F  the job ends; the next word is the next job's list, or 0
+ * A picture is coded at its job's op 2 (or op F without one); after the
+ * last job (or a full buffer) INT is raised.  Without a list (0x010 0) a
+ * start codes the registers as written.
+ */
+#define VENC_LL_ADDR        0x010
+#define VENC_LL_JOBS        0x014
+#define VENC_CUR_JOB        0x018
+#define VENC_INT_EN         0x020
+#define VENC_DBG_SEL        0xD00
+#define VENC_DBG2           0xD08
+#define VENC_REPORT         0xD14
+#define VENC_LL_MAX         4096            /* commands a list may take */
+
+static void venc_update_irq(NvtMediaState *s)
+{
+    qemu_set_irq(s->irq[0],
+                 !!(*reg(s, H26X_INT_FLAG) & *reg(s, VENC_INT_EN)));
+}
+
+static uint32_t venc_ld(uint32_t addr)
+{
+    uint32_t v = 0;
+
+    dma_memory_read(&address_space_memory, addr, &v, 4,
+                    MEMTXATTRS_UNSPECIFIED);
+    return le32_to_cpu(v);
+}
+
+static void venc_code(NvtMediaState *s);
+
+/*
+ * Work through the list from ll_addr until a picture is to be coded (it
+ * goes on from venc_finish) or the list ends.
+ */
+static void venc_run(NvtMediaState *s)
+{
+    int n;
+
+    for (n = 0; n < VENC_LL_MAX && s->ll_addr; n++) {
+        uint32_t cmd = venc_ld(s->ll_addr);
+        uint32_t off = ((cmd >> 8) & 0xFFF) * 4, cnt = cmd & 0xFF, i;
+
+        switch (cmd >> 28) {
+        case 0x0:
+            s->venc_id = (cmd >> 20) & 0xFF;
+            s->venc_dump_cnt = 0;
+            s->venc_coding = false;
+            s->ll_addr += 4;
+            break;
+        case 0x1:
+            for (i = 0; i < cnt; i++) {
+                uint32_t o = off + 4 * i;
+
+                if (o >= 0x020 && o < s->size) {
+                    *reg(s, o) = venc_ld(s->ll_addr + 4 + 4 * i);
+                }
+            }
+            s->ll_addr += 4 + 4 * cnt;
+            break;
+        case 0x2:
+            s->venc_dump_off = off;
+            s->venc_dump_cnt = cnt;
+            s->venc_dump_dst = venc_ld(s->ll_addr + 4);
+            s->ll_addr += 8;
+            if (!s->venc_coding) {
+                venc_code(s);
+                return;
+            }
+            break;
+        case 0xF:
+            if (!s->venc_coding) {
+                venc_code(s);
+                return;
+            }
+            *reg(s, VENC_CUR_JOB) = s->venc_id;
+            s->ll_addr = s->phase > 1 ? venc_ld(s->ll_addr + 4) : 0;
+            s->phase = s->phase ? s->phase - 1 : 0;
+            break;
+        default:
+            qemu_log_mask(LOG_GUEST_ERROR, "nvt-media venc: list command "
+                          "0x%08x at 0x%x\n", cmd, s->ll_addr);
+            s->ll_addr = 0;
+            break;
+        }
+    }
+    s->ll_addr = 0;
+    *reg(s, H26X_INT_FLAG) |= H26X_INT_FINISH;
+    venc_update_irq(s);
+}
+
+static void venc_finish(void *opaque, const NvtH26xResult *r)
+{
+    NvtMediaState *s = opaque;
+    uint32_t i;
+
+    *reg(s, VENC_REPORT + 4 * H26X_RPT_BS_LEN) = r->len;
+    *reg(s, VENC_REPORT + 4 * H26X_RPT_RRC_BITS) = r->len * 8;
+    *reg(s, VENC_REPORT + 4 * H26X_RPT_QP_SUM) = r->qp_sum;
+    s->venc_bslen = r->len;
+    if (r->full) {
+        s->ll_addr = 0;
+        *reg(s, H26X_INT_FLAG) |= H26X_INT_BSOUT_FULL;
+        venc_update_irq(s);
+        return;
+    }
+    if (!s->ll_addr) {                  /* direct */
+        *reg(s, H26X_INT_FLAG) |= H26X_INT_FINISH;
+        venc_update_irq(s);
+        return;
+    }
+    for (i = 0; i < s->venc_dump_cnt; i++) {
+        uint32_t o = s->venc_dump_off + 4 * i;
+        uint32_t v = cpu_to_le32(o < s->size ? *reg(s, o) : 0);
+
+        dma_memory_write(&address_space_memory, s->venc_dump_dst + 4 * i, &v,
+                         4, MEMTXATTRS_UNSPECIFIED);
+    }
+    venc_run(s);
+}
+
+static void venc_code(NvtMediaState *s)
+{
+    s->venc_coding = true;
+    nvt_h26x_encode(s->h26x, s->regs, venc_finish, s);
+}
+
+static uint64_t venc_write(NvtMediaState *s, hwaddr off, uint64_t val)
+{
+    switch (off) {
+    case H26X_CTRL:
+        if (val & H26X_CTRL_SWRST) {
+            *reg(s, H26X_INT_FLAG) |= H26X_INT_SWRST;
+        }
+        if (val & H26X_CTRL_START) {
+            timer_mod(s->timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                      IPP_JOB_NS);
+        }
+        return val & ~(H26X_CTRL_SWRST | H26X_CTRL_START);
+    case H26X_INT_FLAG:
+        return *reg(s, off) & ~val;
+    }
+    return val;
+}
+
+static bool venc_read(NvtMediaState *s, hwaddr off, uint64_t *val)
+{
+    if (off == VENC_DBG2 && !(*reg(s, VENC_DBG_SEL) & 0xFF00)) {
+        *val = s->venc_bslen +
+               (*reg(s, H26X_CTRL) & (1u << 16) ? 0x80 : 0x100);
+        return true;
+    }
+    return false;
+}
+
+static void venc_done(NvtMediaState *s)
+{
+    uint32_t ll = *reg(s, VENC_LL_ADDR);
+
+    if (ll) {
+        s->ll_addr = ll;
+        s->phase = *reg(s, VENC_LL_JOBS) & 0xFF;
+        *reg(s, VENC_LL_ADDR) = 0;      /* a later direct start has none */
+        venc_run(s);
+    } else {
+        s->venc_dump_cnt = 0;
+        venc_code(s);
+    }
 }
 
 /*
@@ -722,17 +1242,33 @@ static const NvtMediaEngine nvt_media_engines[] = {
     { "sie", sie_write, sie_read, NULL, sie_frame, sie_update_irq },
     { "sie2", sie_write, sie_read, NULL, sie_frame, sie_update_irq },
     { "sie3", sie_write, sie_read, NULL, sie_frame, sie_update_irq },
+    /* NA51055's SIE4 / SIE5 */
+    { "sie4", sie_write, sie_read, NULL, sie_frame, sie_update_irq },
+    { "sie5", sie_write, sie_read, NULL, sie_frame, sie_update_irq },
     { "ife", ipp_write, NULL, NULL, ipp_job_done, ipp_update_irq, &ipp_ife },
     { "dce", ipp_write, NULL, NULL, ipp_job_done, ipp_update_irq, &ipp_dce },
     { "ipe", ipp_write, NULL, NULL, ipp_job_done, ipp_update_irq, &ipp_ipe },
     { "ime", ipp_write, NULL, NULL, ipp_job_done, ipp_update_irq, &ipp_ime },
     { "h26x", h26x_write, NULL, h26x_reset, h26x_done, h26x_update_irq },
+    { "venc", venc_write, venc_read, h26x_reset, venc_done, venc_update_irq },
     { "jpg", jpg_write, jpg_read, NULL, jpg_done, jpg_update_irq },
     { "ise", ipp_write, NULL, NULL, ipp_job_done, ipp_update_irq, &ipp_ise },
     { "graphic", ipp_write, NULL, NULL, ipp_job_done, ipp_update_irq,
       &ipp_grph },
     { "graphic2", ipp_write, NULL, NULL, ipp_job_done, ipp_update_irq,
       &ipp_grph },
+    { "ai", ipp_write, ai_read, NULL, ipp_job_done, ipp_update_irq,
+      &ipp_nue },
+    { "ai2", ipp_write, ai_read, NULL, ipp_job_done, ipp_update_irq,
+      &ipp_nue2 },
+    { "ai3", ipp_write, ai_read, NULL, ipp_job_done, ipp_update_irq,
+      &ipp_cnn },
+    /* NA51055's second CNN: its "ai" node is NUE, NUE2, CNN2, CNN1 */
+    { "ai4", ipp_write, ai_read, NULL, ipp_job_done, ipp_update_irq,
+      &ipp_cnn },
+    { "md", ipp_write, ai_read, NULL, ipp_job_done, ipp_update_irq, &ipp_md },
+    { "ive", ipp_write, ive_read, NULL, ipp_job_done, ipp_update_irq,
+      &ipp_ive },
 };
 
 static uint64_t nvt_media_read(void *opaque, hwaddr off, unsigned size)
@@ -790,6 +1326,9 @@ static void nvt_media_reset(DeviceState *dev)
 
     timer_del(s->timer);
     memset(s->regs, 0, s->size);
+    ai_job_detach(s);           /* a job on the worker comes back void */
+    s->ai_pending = 0;
+    s->ive_done = 0;
     s->frames = 0;
     s->jpg_lut = 0;
     memset(s->jpg_q, 0, sizeof(s->jpg_q));
@@ -818,7 +1357,8 @@ static void nvt_media_realize(DeviceState *dev, Error **errp)
         }
     }
     s->regs = g_malloc0(s->size);
-    if (s->engine->timer == h26x_done) {
+    s->ai_regs = g_malloc0(s->size);
+    if (s->engine->timer == h26x_done || s->engine->timer == venc_done) {
         s->h26x = nvt_h26x_new();
     }
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, nvt_media_timer, s);
@@ -836,22 +1376,39 @@ static void nvt_media_unrealize(DeviceState *dev)
 
     nvt_h26x_free(s->h26x);
     s->h26x = NULL;
+    ai_job_detach(s);
     timer_free(s->timer);
     g_free(s->regs);
+    g_free(s->ai_regs);
 }
 
 static const Property nvt_media_properties[] = {
     DEFINE_PROP_STRING("engine", NvtMediaState, engine_name),
     DEFINE_PROP_UINT32("size", NvtMediaState, size, 0x1000),
     DEFINE_PROP_BOOL("trace", NvtMediaState, trace, false),
+    DEFINE_PROP_STRING("ai-dump", NvtMediaState, ai_dump),
+    DEFINE_PROP_UINT32("ai-dump-ram", NvtMediaState, ai_dump_ram, 128 * MiB),
     DEFINE_PROP_LINK("ipp-input", NvtMediaState, ipp_src, TYPE_NVT_MEDIA,
                      NvtMediaState *),
 };
 
+/* an AI job that was on the source's worker runs again here */
+static int nvt_media_post_load(void *opaque, int version_id)
+{
+    NvtMediaState *s = opaque;
+
+    ai_job_detach(s);           /* a loadvm over a running job */
+    if (s->ai_pending && ai_engine_run(s)) {
+        ai_job_start(s, s->phase, s->ai_res);
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_nvt_media = {
     .name = TYPE_NVT_MEDIA,
-    .version_id = 1,
+    .version_id = 4,
     .minimum_version_id = 1,
+    .post_load = nvt_media_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_VBUFFER_UINT32(regs, NvtMediaState, 1, NULL, size),
         VMSTATE_TIMER_PTR(timer, NvtMediaState),
@@ -860,6 +1417,16 @@ static const VMStateDescription vmstate_nvt_media = {
         VMSTATE_UINT32(frames, NvtMediaState),
         VMSTATE_UINT8_ARRAY(jpg_q, NvtMediaState, 128),
         VMSTATE_UINT32(jpg_lut, NvtMediaState),
+        VMSTATE_UINT32_V(ai_pending, NvtMediaState, 2),
+        VMSTATE_UINT32_V(ai_res, NvtMediaState, 2),
+        VMSTATE_VBUFFER_UINT32(ai_regs, NvtMediaState, 2, NULL, size),
+        VMSTATE_UINT32_V(ive_done, NvtMediaState, 3),
+        VMSTATE_UINT32_V(venc_id, NvtMediaState, 4),
+        VMSTATE_UINT32_V(venc_dump_off, NvtMediaState, 4),
+        VMSTATE_UINT32_V(venc_dump_cnt, NvtMediaState, 4),
+        VMSTATE_UINT32_V(venc_dump_dst, NvtMediaState, 4),
+        VMSTATE_UINT32_V(venc_bslen, NvtMediaState, 4),
+        VMSTATE_BOOL_V(venc_coding, NvtMediaState, 4),
         VMSTATE_END_OF_LIST()
     }
 };
